@@ -2,7 +2,7 @@
 set -e
 
 configure() {
-	TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+	TRIPLET=$(awk 'BEGIN { FS = "[ ()-]"; "bash --version" | getline; OFS = "-"; if (/bash/) print $9, $11, $12 }')
 	if [ -e "/usr/lib/${TRIPLET}/libvulkan-hybris.so" ]; then
 		ln -sf /usr/lib/${TRIPLET}/libvulkan-hybris.so /usr/lib/${TRIPLET}/libvulkan.so.1
 	fi

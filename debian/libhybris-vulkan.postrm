@@ -2,7 +2,7 @@
 set -e
 
 configure() {
-	TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+	TRIPLET=$(awk 'BEGIN { FS = "[ ()-]"; "bash --version" | getline; OFS = "-"; if (/bash/) print $9, $11, $12 }')
 	LIBVULKAN=$(ls /usr/lib/${TRIPET}/ | grep -E 'libvulkan.so.[0-9]+\.[0-9]+\.[0-9]+')
 	if [ ! -z "${LIBVULKAN}" ]; then
 		ln -sf ${LIBVULKAN} /usr/lib/${TRIPLET}/libvulkan.so.1
