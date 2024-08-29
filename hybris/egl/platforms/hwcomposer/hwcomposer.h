@@ -58,6 +58,17 @@ struct ANativeWindow *HWCNativeWindowCreate(unsigned int width, unsigned int hei
  */
 void HWCNativeWindowDestroy(struct ANativeWindow *window);
 
+/** Set the buffer count of a native window.
+ *
+ * The default buffer count is 2.
+ * Returns 0 on success.
+ *
+ * \param cnt The new buffer count to use
+ *
+ * \sa HWCNativeWindowCreate
+ */
+int HWCNativeWindowSetBufferCount(struct ANativeWindow *window, int cnt);
+
 /** Get the current fence FD on a buffer.
  *
  * The buffer must be a buffer passed from the HWC layer trough the present

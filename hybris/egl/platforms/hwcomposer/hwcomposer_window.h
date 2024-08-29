@@ -48,6 +48,7 @@ public:
 
     int getFenceBufferFd(HWComposerNativeWindowBuffer *buffer);
     void setFenceBufferFd(HWComposerNativeWindowBuffer *buffer, int fd);
+    virtual int setBufferCount(int cnt);
 protected:
     // overloads from BaseNativeWindow
     virtual int setSwapInterval(int interval);
@@ -70,7 +71,6 @@ protected:
     virtual int setUsage(uint64_t usage);
     virtual int setBuffersFormat(int format);
     virtual int setBuffersDimensions(int width, int height);
-    virtual int setBufferCount(int cnt);
     virtual void present(HWComposerNativeWindowBuffer *buffer) = 0;
 
 private:

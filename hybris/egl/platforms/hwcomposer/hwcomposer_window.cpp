@@ -77,6 +77,11 @@ extern "C" void HWCNativeWindowDestroy(struct ANativeWindow *window)
     delete window;
 }
 
+extern "C" int HWCNativeWindowSetBufferCount(struct ANativeWindow *window, int cnt)
+{
+    return static_cast<HWComposerNativeWindow *>(window)->setBufferCount(cnt);
+}
+
 struct _BufferFenceAccessor : public HWComposerNativeWindowBuffer {
     int get() { return fenceFd; }
     void set(int fd) { fenceFd = fd; };
