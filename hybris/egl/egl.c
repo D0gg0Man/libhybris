@@ -54,6 +54,7 @@ static EGLenum    loaded_ws = EGL_NONE;
 static EGLint      (*_eglGetError)(void) = NULL;
 
 static EGLDisplay  (*_eglGetDisplay)(EGLNativeDisplayType display_id) = NULL;
+static EGLBoolean  (*_eglInitialize)(EGLDisplay dpy, EGLint *major, EGLint *minor) = NULL;
 static EGLBoolean  (*_eglTerminate)(EGLDisplay dpy) = NULL;
 
 static const char *  (*_eglQueryString)(EGLDisplay dpy, EGLint name) = NULL;
@@ -368,7 +369,15 @@ EGLDisplay eglGetPlatformDisplay(EGLenum platform,
 	return __eglHybrisGetPlatformDisplayCommon(platform, display_id, attrib_list);
 }
 
-HYBRIS_EGL_IMPLEMENT_FUNCTION3(egl, EGLBoolean, eglInitialize, EGLDisplay, EGLint *, EGLint *);
+EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
+{
+	HYBRIS_DLSYSM(egl, &_eglInitialize, "eglInitialize");
+	EGLBoolean ret = _eglInitialize(dpy, major, minor);
+	if (ret) {
+		ws_egl_initialized();
+	}
+	return ret;
+}
 
 EGLBoolean eglTerminate(EGLDisplay dpy)
 {
@@ -641,6 +650,7 @@ static struct FuncNamePair _eglHybrisOverrideFunctions[] = {
 	OVERRIDE_SAMENAME(eglGetError),
 	OVERRIDE_SAMENAME(eglGetDisplay),
 	OVERRIDE_SAMENAME(eglGetPlatformDisplay),
+	OVERRIDE_SAMENAME(eglInitialize),
 	OVERRIDE_SAMENAME(eglTerminate),
 	OVERRIDE_SAMENAME(eglCreateWindowSurface),
 	OVERRIDE_SAMENAME(eglCreatePlatformWindowSurface),
