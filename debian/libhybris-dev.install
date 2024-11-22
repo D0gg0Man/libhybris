@@ -1,5 +1,6 @@
 usr/include/hybris/camera
 usr/include/hybris/common
+usr/include/hybris/gralloc
 usr/include/hybris/dlfcn
 usr/include/hybris/*platformcommon
 usr/include/hybris/hwc2
