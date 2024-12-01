@@ -177,7 +177,8 @@ Description: libhybris extension for the org.freedesktop.Platform.GL runtime
 
 Package: libhybris-vulkan
 Architecture: amd64 arm64 armhf i386
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends}, ${shlibs:Depends},
+         runonce,
 Provides: libvulkan1
 Replaces: libvulkan1
 Description: library to provide access to Android vulkan HAL
