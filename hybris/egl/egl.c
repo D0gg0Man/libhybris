@@ -372,7 +372,7 @@ EGLDisplay eglGetPlatformDisplay(EGLenum platform,
 EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 {
 	HYBRIS_DLSYSM(egl, &_eglInitialize, "eglInitialize");
-	EGLBoolean ret = _eglInitialize(dpy, major, minor);
+	EGLBoolean ret = _eglInitialize(hybris_egl_get_real_display(dpy), major, minor);
 	if (ret) {
 		ws_egl_initialized();
 	}
