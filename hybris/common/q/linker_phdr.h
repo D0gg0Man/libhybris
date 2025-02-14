@@ -38,6 +38,41 @@
 #include "linker.h"
 #include "linker_mapped_file_fragment.h"
 
+enum SystemRegister : uint32_t {
+  TpidrEl0 = 0x5E82,
+  TpidrroEl0 = 0x5E83,
+  CntfrqEl0 = 0x5F00,
+  CntpctEl0 = 0x5F01,
+};
+
+// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/MRS--Move-System-Register-
+union MRS {
+  constexpr explicit MRS(uint32_t raw_) : raw{raw_} {}
+
+  constexpr bool Verify() {
+    return (GetSig() == 0xD53);
+  }
+
+  constexpr uint32_t GetRt() {
+    return (raw >> 0) & 0x1F; // bits 0-4
+  }
+
+  constexpr uint32_t GetSystemReg() {
+    return (raw >> 5) & 0x7FFF; // bits 5-19
+  }
+
+  constexpr uint32_t GetSig() {
+    return (raw >> 20) & 0xFFF; // bits 20-31
+  }
+
+  uint32_t raw;
+};
+
+static_assert(sizeof(MRS) == sizeof(uint32_t));
+static_assert(MRS(0xD53BE020).Verify());
+static_assert(MRS(0xD53BE020).GetSystemReg() == CntpctEl0);
+static_assert(MRS(0xD53BE020).GetRt() == 0x0);
+
 class ElfReader {
  public:
   ElfReader();

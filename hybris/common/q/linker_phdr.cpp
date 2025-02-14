@@ -598,6 +598,8 @@ bool ElfReader::ReserveAddressSpace(address_space_params* address_space) {
   return true;
 }
 
+__attribute__((tls_model ("initial-exec"))) __thread void *gl_tls_space[2] = {nullptr, nullptr};
+
 bool ElfReader::LoadSegments() {
   for (size_t i = 0; i < phdr_num_; ++i) {
     const ElfW(Phdr)* phdr = &phdr_table_[i];
@@ -656,6 +658,7 @@ bool ElfReader::LoadSegments() {
         // https://source.android.com/devices/tech/debug/execute-only-memory
         // without this libgcc's unwind on host may crash
         prot |= PROT_READ;
+        prot |= PROT_WRITE;
       }
 
       void* seg_addr = mmap64(reinterpret_cast<void*>(seg_page_start),
@@ -667,6 +670,54 @@ bool ElfReader::LoadSegments() {
       if (seg_addr == MAP_FAILED) {
         DL_ERR("couldn't map \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
         return false;
+      }
+
+      const int TLS_SLOT_OPENGL = 3;
+      const int TLS_SLOT_STACK_GUARD = 5;
+
+      if ((prot & PROT_EXEC) != 0) {
+        void* tp = __builtin_thread_pointer();
+        int gl_tls_offset = (reinterpret_cast<uintptr_t>(&gl_tls_space[0]) - reinterpret_cast<uintptr_t>(tp)) / 8;
+        // DL_WARN("Offset to tls_space[0]: 0x%d", gl_tls_offset);
+
+        uint32_t* text = static_cast<uint32_t*>(seg_addr);
+        for (int i = 0; i * sizeof(uint32_t) < file_length; i++) {
+          const uint32_t inst = text[i];
+          auto mrs = MRS{inst};
+
+          if (mrs.Verify() && mrs.GetSystemReg() == TpidrEl0) {
+
+            // Check next 4 instructions
+            uint32_t rt = mrs.GetRt();
+            for (int j = 0; j < 4; j++) {
+              const uint32_t inst_2 = text[i + j];
+              uint8_t rn = (inst_2 >> 5) & 0x1F;
+
+              if ((inst_2 & 0x3b000000) == 0x39000000 && rn == rt) {
+                uint16_t imm12 = (inst_2 >> 10) & 0xFFF;
+                uint16_t offset = imm12 * 8;
+
+                // Skip TLS_SLOT_STACK_GUARD as it shouldn't cause issues
+                if (imm12 != TLS_SLOT_STACK_GUARD) {
+                  /* DL_WARN("TPIDR_EL0 register is used in the code of \"%s\" at offset 0x%zx, LDR [, #0x%x] at +%d",
+                        name_.c_str(), file_offset_ + file_page_start + i * sizeof(uint32_t), offset, j * 4); */
+
+                    if (imm12 == TLS_SLOT_OPENGL) {
+                      // Replace imm12 with tls_offset in LDR instruction
+                      uint32_t new_inst_2 = (inst_2 & ~(0xFFF << 10)) | ((gl_tls_offset & 0xFFF) << 10);
+                      text[i + j] = new_inst_2;
+                    }
+                }
+                break;
+              }
+            }
+          }
+        }
+
+        if (mprotect(seg_addr, file_length, prot & ~PROT_WRITE) < 0) {
+          DL_ERR("couldn't mprotect \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
+          return false;
+        }
       }
     }
 
