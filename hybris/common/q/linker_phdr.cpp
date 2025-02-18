@@ -640,7 +640,6 @@ bool ElfReader::LoadSegments() {
 
     if (file_length != 0) {
       int prot = PFLAGS_TO_PROT(phdr->p_flags);
-      bool was_executable = false;
       if ((prot & (PROT_EXEC | PROT_WRITE)) == (PROT_EXEC | PROT_WRITE)) {
         // W + E PT_LOAD segments are not allowed in O.
         if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
@@ -659,12 +658,6 @@ bool ElfReader::LoadSegments() {
         // https://source.android.com/devices/tech/debug/execute-only-memory
         // without this libgcc's unwind on host may crash
         prot |= PROT_READ;
-        prot |= PROT_WRITE;
-
-        // Strip executable while patching TLS stuff, cause some processes
-        // really don't want W+X segments (e.g. pulseaudio)
-        was_executable = true;
-        prot &= ~PROT_EXEC;
       }
 
       void* seg_addr = mmap64(reinterpret_cast<void*>(seg_page_start),
@@ -681,7 +674,7 @@ bool ElfReader::LoadSegments() {
       const int TLS_SLOT_OPENGL = 3;
       const int TLS_SLOT_STACK_GUARD = 5;
 
-      if ((prot & PROT_EXEC) != 0 || was_executable) {
+      if ((prot & PROT_EXEC) != 0) {
         void* tp = __builtin_thread_pointer();
         int gl_tls_offset = (reinterpret_cast<uintptr_t>(&gl_tls_space[0]) - reinterpret_cast<uintptr_t>(tp)) / 8;
         // DL_WARN("Offset to tls_space[0]: 0x%d", gl_tls_offset);
@@ -709,9 +702,22 @@ bool ElfReader::LoadSegments() {
                         name_.c_str(), file_offset_ + file_page_start + i * sizeof(uint32_t), offset, j * 4); */
 
                     if (imm12 == TLS_SLOT_OPENGL) {
+                      // Uh oh, we need to write but the segment is read-only. mprotect all day long
+
+                      if (mprotect(seg_addr, file_length, prot | PROT_WRITE) < 0) {
+                        DL_ERR("inner: couldn't mprotect \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
+                        return false;
+                      }
+
                       // Replace imm12 with tls_offset in LDR instruction
                       uint32_t new_inst_2 = (inst_2 & ~(0xFFF << 10)) | ((gl_tls_offset & 0xFFF) << 10);
                       text[i + j] = new_inst_2;
+
+                      // mprotect back
+                      if (mprotect(seg_addr, file_length, prot & ~PROT_WRITE) < 0) {
+                        DL_ERR("outer: couldn't mprotect \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
+                        return false;
+                      }
                     }
                 }
                 break;
@@ -720,13 +726,12 @@ bool ElfReader::LoadSegments() {
           }
         }
 
-        if (was_executable) {
-          prot |= PROT_EXEC;
-        }
-
-        if (mprotect(seg_addr, file_length, prot & ~PROT_WRITE) < 0) {
-          DL_ERR("couldn't mprotect \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
-          return false;
+        // If we have the PROT_WRITE flag, we need to remove it
+        if (prot & PROT_WRITE) {
+          if (mprotect(seg_addr, file_length, prot & ~PROT_WRITE) < 0) {
+            DL_ERR("couldn't mprotect \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
+            return false;
+          }
         }
       }
     }
