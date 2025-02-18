@@ -640,6 +640,7 @@ bool ElfReader::LoadSegments() {
 
     if (file_length != 0) {
       int prot = PFLAGS_TO_PROT(phdr->p_flags);
+      bool was_executable = false;
       if ((prot & (PROT_EXEC | PROT_WRITE)) == (PROT_EXEC | PROT_WRITE)) {
         // W + E PT_LOAD segments are not allowed in O.
         if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
@@ -659,6 +660,11 @@ bool ElfReader::LoadSegments() {
         // without this libgcc's unwind on host may crash
         prot |= PROT_READ;
         prot |= PROT_WRITE;
+
+        // Strip executable while patching TLS stuff, cause some processes
+        // really don't want W+X segments (e.g. pulseaudio)
+        was_executable = true;
+        prot &= ~PROT_EXEC;
       }
 
       void* seg_addr = mmap64(reinterpret_cast<void*>(seg_page_start),
@@ -675,7 +681,7 @@ bool ElfReader::LoadSegments() {
       const int TLS_SLOT_OPENGL = 3;
       const int TLS_SLOT_STACK_GUARD = 5;
 
-      if ((prot & PROT_EXEC) != 0) {
+      if ((prot & PROT_EXEC) != 0 || was_executable) {
         void* tp = __builtin_thread_pointer();
         int gl_tls_offset = (reinterpret_cast<uintptr_t>(&gl_tls_space[0]) - reinterpret_cast<uintptr_t>(tp)) / 8;
         // DL_WARN("Offset to tls_space[0]: 0x%d", gl_tls_offset);
@@ -712,6 +718,10 @@ bool ElfReader::LoadSegments() {
               }
             }
           }
+        }
+
+        if (was_executable) {
+          prot |= PROT_EXEC;
         }
 
         if (mprotect(seg_addr, file_length, prot & ~PROT_WRITE) < 0) {
