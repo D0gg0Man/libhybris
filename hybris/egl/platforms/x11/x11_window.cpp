@@ -643,7 +643,30 @@ void X11NativeWindow::copyToX11(X11NativeWindowBuffer *wnb) {
 
     if (m_useShm)
     {
-        memcpy(m_image->data, vaddr, m_image->bytes_per_line * m_image->height);
+        // Use pixel-by-pixel color conversion instead of memcpy
+        // memcpy(m_image->data, vaddr, m_image->bytes_per_line * m_image->height);
+        unsigned char *src_data = (unsigned char *)vaddr;
+        unsigned char *dst_data = (unsigned char *)m_image->data;
+        int src_stride_bytes = wnb->stride * 4;
+        int dst_stride_bytes = m_image->bytes_per_line;
+
+        for (int row = 0; row < wnb->height && row < m_image->height; row++) {
+            unsigned int *src_row = (unsigned int *)(src_data + (row * src_stride_bytes));
+            unsigned int *dst_row = (unsigned int *)(dst_data + (row * dst_stride_bytes));
+
+            for (int col = 0; col < wnb->width; col++) {
+                unsigned int pixel = src_row[col];
+
+                // RGBA to BGRA conversion
+                unsigned char r = (pixel >> 0) & 0xFF;
+                unsigned char g = (pixel >> 8) & 0xFF;
+                unsigned char b = (pixel >> 16) & 0xFF;
+                unsigned char a = (pixel >> 24) & 0xFF;
+
+                dst_row[col] = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+
         hybris_gralloc_unlock(wnb->handle);
         XShmPutImage(m_display, m_window, m_gc, m_image, 0, 0, 0, 0, m_width, m_height, 0);
     }
