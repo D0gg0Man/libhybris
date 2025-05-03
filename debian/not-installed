@@ -17,3 +17,20 @@
 /usr/lib/*/libGLESv2.so*
 /usr/lib/*/libGLESv1_CM.so*
 /usr/lib/*/libOpenCL.so*
+
+# Broken tests (libhardware, no longer functional on new devices)
+/usr/bin/test_audio
+/usr/bin/test_camera
+/usr/bin/test_gps
+/usr/bin/test_input
+/usr/bin/test_media
+/usr/bin/test_nfc
+/usr/bin/test_opencl
+/usr/bin/test_recorder
+/usr/bin/test_sensors
+/usr/bin/test_sf
+/usr/bin/test_vibrator
+/usr/bin/test_wifi
+
+# pkgconfig files provided by other packages in debian
+/usr/lib/*/pkgconfig/OpenCL.pc

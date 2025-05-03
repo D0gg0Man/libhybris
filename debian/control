@@ -1,8 +1,8 @@
 Source: libhybris
 Priority: optional
-Maintainer: Halium Developers <admin@halium.org>
-Build-Depends: android-headers,
-               debhelper (>= 12),
+Maintainer: Bardia Moshiri <bardia@furilabs.com>
+Build-Depends: debhelper-compat (= 13),
+               android-headers,
                libwayland-dev,
                libwayland-egl-backend-dev,
                libx11-xcb-dev,
@@ -15,11 +15,11 @@ Build-Depends: android-headers,
                binutils,
                patchelf,
                python3,
-               quilt
-Standards-Version: 4.4.1
+               quilt,
+Standards-Version: 4.7.2
 Section: libs
-Vcs-Git: https://gitlab.com/debian-pm/halium/libhybris.git
-Vcs-Browser: https://gitlab.com/debian-pm/halium/libhybris
+Vcs-Git: https://gitlab.com/furilabs/libhybris
+Vcs-Browser: https://gitlab.com/furilabs/libhybris
 
 Package: libandroid-properties1
 Architecture: amd64 arm64 armhf i386

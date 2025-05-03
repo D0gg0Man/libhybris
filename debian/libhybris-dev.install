@@ -14,6 +14,7 @@ usr/lib/*/libhwc2.so
 usr/lib/*/libhybris-platformcommon.so
 usr/lib/*/libhybris-eglplatformcommon.so
 usr/lib/*/libhybris-hwcomposerwindow.so
+usr/lib/*/libhybris-vulkanplatformcommon.so
 usr/lib/*/libis.so
 usr/lib/*/libnfc_nxp.so
 usr/lib/*/libnfc_ndef_nxp.so
