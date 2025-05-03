@@ -6,7 +6,7 @@ usr/lib/*/libgralloc.so.*
 usr/lib/*/libui.so.*
 usr/lib/*/libsf.so.*
 usr/lib/*/libis.so.*
-usr/lib/*/libcamera.so.*
+usr/lib/*/libcamera-hybris.so.*
 usr/lib/*/libwifi.so.*
 usr/lib/*/libnfc_nxp.so.*
 usr/lib/*/libnfc_ndef_nxp.so.*

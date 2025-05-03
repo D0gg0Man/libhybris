@@ -272,7 +272,7 @@ test_camera_LDADD = \
 	$(top_builddir)/common/libhybris-common.la \
 	$(libegl) \
 	$(libglesv2) \
-	$(top_builddir)/camera/libcamera.la \
+	$(top_builddir)/camera/libcamera-hybris.la \
 	$(top_builddir)/input/libis.la \
 	$(WAYLAND_EGL_LIBS) \
 	$(WAYLAND_CLIENT_LIBS)
@@ -313,7 +313,7 @@ test_recorder_LDADD = \
 	$(libegl) \
 	$(libglesv2) \
 	$(top_builddir)/media/libmedia.la \
-	$(top_builddir)/camera/libcamera.la \
+	$(top_builddir)/camera/libcamera-hybris.la \
 	$(top_builddir)/input/libis.la \
 	$(top_builddir)/sf/libsf.la
 

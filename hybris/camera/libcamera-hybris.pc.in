@@ -6,5 +6,5 @@ includedir=@includedir@
 Name: hybris-camera
 Description: libhybris camera library
 Version: @VERSION@
-Libs: -L${libdir} -lhybris-common -lcamera
+Libs: -L${libdir} -lhybris-common -lcamera-hybris
 Cflags: -I${includedir}

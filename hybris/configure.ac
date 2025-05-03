@@ -302,7 +302,7 @@ AC_CONFIG_FILES([
 	properties/Makefile
 	properties/libandroid-properties.pc
 	camera/Makefile
-	camera/libcamera.pc
+	camera/libcamera-hybris.pc
 	common/Makefile
 	common/jb/Makefile
 	common/stub/Makefile
