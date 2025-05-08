@@ -250,27 +250,40 @@ extern "C" void x11ws_setSwapInterval(EGLDisplay dpy, EGLNativeWindowType win, E
 extern "C" EGLBoolean x11ws_eglGetConfigAttrib(struct _EGLDisplay *display, EGLConfig config, EGLint attribute, EGLint *value)
 {
 	TRACE("attribute:%i", attribute);
+
 	if (attribute == EGL_NATIVE_VISUAL_ID)
 	{
 		X11Display *xdpy = (X11Display *)display;
+
+		// Validate that xdpy and xdpy->xl_display are not NULL
+		if (!xdpy || !xdpy->xl_display) {
+			TRACE("Invalid X11 display");
+			return EGL_FALSE;
+		}
+
 		XVisualInfo visinfo_template;
-		XVisualInfo *visinfo = NULL;
-		int visinfos_count = 0;
+		memset(&visinfo_template, 0, sizeof(XVisualInfo));
 
 		visinfo_template.depth = 32;
-		visinfo = XGetVisualInfo (xdpy->xl_display,
+
+		int visinfos_count = 0;
+		XVisualInfo *visinfo = XGetVisualInfo(xdpy->xl_display,
 							VisualDepthMask,
 							&visinfo_template,
 							&visinfos_count);
 
-		if (visinfos_count)
+		if (visinfo && visinfos_count > 0)
 		{
-			TRACE("visinfo.visualid:%i", attribute);
+			TRACE("visinfo.visualid:%lu", (unsigned long)visinfo->visualid);
 			*value = visinfo->visualid;
+			XFree(visinfo);
 			return EGL_TRUE;
 		}
 
+		if (visinfo)
+			XFree(visinfo);
 	}
+
 	return EGL_FALSE;
 }
 
