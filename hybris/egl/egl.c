@@ -82,6 +82,7 @@ static EGLImageKHR (*_eglCreateImageKHR)(EGLDisplay dpy, EGLContext ctx, EGLenum
 static EGLBoolean (*_eglDestroyImageKHR) (EGLDisplay dpy, EGLImageKHR image) = NULL;
 
 static void (*_glEGLImageTargetTexture2DOES) (GLenum target, GLeglImageOES image) = NULL;
+static void (*_glEGLImageTargetRenderbufferStorageOES) (GLenum target, GLeglImageOES image) = NULL;
 
 static __eglMustCastToProperFunctionPointerType (*_eglGetProcAddress)(const char *procname) = NULL;
 
@@ -405,6 +406,19 @@ EGLBoolean eglTerminate(EGLDisplay dpy)
 const char * eglQueryString(EGLDisplay dpy, EGLint name)
 {
 	HYBRIS_DLSYSM(egl, &_eglQueryString, "eglQueryString");
+
+#ifdef WANT_WAYLAND
+	if (dpy == EGL_NO_DISPLAY && name == EGL_EXTENSIONS) {
+		const char *ret = _eglQueryString(dpy, name);
+		static char eglextensionsbuf[2048];
+		snprintf(eglextensionsbuf, 2046, "%s %s", ret,
+			"EGL_EXT_client_extensions EGL_EXT_platform_wayland EGL_KHR_platform_wayland"
+		);
+		ret = eglextensionsbuf;
+		return ret;
+	}
+#endif
+
 	return ws_eglQueryString(hybris_egl_get_real_display(dpy), name, _eglQueryString);
 }
 
@@ -431,6 +445,8 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
 
 	if (result != EGL_NO_SURFACE)
 		egl_helper_push_mapping(result, win);
+	else
+		ws_DestroyWindow(win);
 
 	HYBRIS_TRACE_END("hybris-egl", "eglCreateWindowSurface", "");
 	return result;
@@ -628,6 +644,13 @@ static void _my_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image)
 	(*_glEGLImageTargetTexture2DOES)(target, img ? img->egl_image : NULL);
 }
 
+static void _my_glEGLImageTargetRenderbufferStorageOES(GLenum target, GLeglImageOES image)
+{
+	HYBRIS_DLSYSM(glesv2, &_glEGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES");
+	struct egl_image *img = image;
+	(*_glEGLImageTargetRenderbufferStorageOES)(target, img ? img->egl_image : NULL);
+}
+
 EGLBoolean _my_eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
 {
 	HYBRIS_DLSYSM(egl, &_eglDestroyImageKHR, "eglDestroyImageKHR");
@@ -654,6 +677,7 @@ static struct FuncNamePair _eglHybrisOverrideFunctions[] = {
 	OVERRIDE_MY(eglSwapBuffersWithDamageEXT),
 	OVERRIDE_TO(eglSwapBuffersWithDamageKHR, _my_eglSwapBuffersWithDamageEXT),
 	OVERRIDE_MY(glEGLImageTargetTexture2DOES),
+	OVERRIDE_MY(glEGLImageTargetRenderbufferStorageOES),
 	OVERRIDE_MY(eglDestroyImageKHR),
 	OVERRIDE_SAMENAME(eglGetError),
 	OVERRIDE_SAMENAME(eglGetDisplay),

@@ -51,6 +51,7 @@ struct WaylandDisplay {
     wl_registry *registry;
     android_wlegl *wlegl;
     WaylandNativeWindow *window;
+    wl_display *wl_dpy_wrapper;
 
     int current_swapchain_width;
     int current_swapchain_height;
@@ -153,6 +154,7 @@ void freeWaylandDisplay(WaylandDisplay *wdpy)
     assert(ret >= 0);
     android_wlegl_destroy(wdpy->wlegl);
     wl_registry_destroy(wdpy->registry);
+    wl_proxy_wrapper_destroy(wdpy->wl_dpy_wrapper);
     wl_event_queue_destroy(wdpy->queue);
     delete wdpy;
 }
@@ -243,12 +245,12 @@ static VkResult waylandws_vkCreateWaylandSurfaceKHR(VkInstance instance,
     wdpy->current_swapchain_width = 0;
     wdpy->current_swapchain_height = 0;
     wdpy->queue = wl_display_create_queue(wdpy->wl_dpy);
-    wdpy->registry = wl_display_get_registry(wdpy->wl_dpy);
-    wl_proxy_set_queue((wl_proxy *) wdpy->registry, wdpy->queue);
+    wdpy->wl_dpy_wrapper = (struct wl_display *) wl_proxy_create_wrapper(wdpy->wl_dpy);
+    wl_proxy_set_queue((struct wl_proxy *) wdpy->wl_dpy_wrapper, wdpy->queue);
+    wdpy->registry = wl_display_get_registry(wdpy->wl_dpy_wrapper);
     wl_registry_add_listener(wdpy->registry, &registry_listener, wdpy);
 
-    wl_callback *cb = wl_display_sync(wdpy->wl_dpy);
-    wl_proxy_set_queue((wl_proxy *) cb, wdpy->queue);
+    wl_callback *cb = wl_display_sync(wdpy->wl_dpy_wrapper);
     wl_callback_add_listener(cb, &callback_listener, wdpy);
 
     ret = 0;

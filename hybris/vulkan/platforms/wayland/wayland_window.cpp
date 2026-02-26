@@ -157,13 +157,6 @@ void WaylandNativeWindow::presentBuffer(WaylandNativeWindowBuffer *wnb)
         return;
     }
 
-    if (!wnb) {
-        return;
-    }
-
-    m_lastBuffer = wnb;
-    wnb->busy = 1;
-
     ret = readQueue(false);
     if (this->frame_callback) {
         do {
@@ -171,37 +164,62 @@ void WaylandNativeWindow::presentBuffer(WaylandNativeWindowBuffer *wnb)
         } while (this->frame_callback && ret != -1);
     }
     if (ret < 0) {
-        HYBRIS_TRACE_END("wayland-platform", "queueBuffer_wait_for_frame_callback", "-%p", wnb);
+        HYBRIS_TRACE_END("wayland-platform", "queueBuffer_wait_for_frame_callback", "");
         return;
     }
 
-    if (wnb->wlbuffer == NULL)
-    {
-        wnb->init(m_android_wlegl, m_display, wl_queue);
-        TRACE("%p add listener with %p inside", wnb, wnb->wlbuffer);
-        wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
-        wl_proxy_set_queue((struct wl_proxy *) wnb->wlbuffer, this->wl_queue);
-    }
-
     if (m_swap_interval > 0) {
-        this->frame_callback = wl_surface_frame(m_window->surface);
+        this->frame_callback = wl_surface_frame(wl_surface_wrapper);
         wl_callback_add_listener(this->frame_callback, &frame_listener, this);
-        wl_proxy_set_queue((struct wl_proxy *) this->frame_callback, this->wl_queue);
     }
 
-    wl_surface_attach(m_window->surface, wnb->wlbuffer, 0, 0);
-    wl_surface_damage(m_window->surface, 0, 0, wnb->width, wnb->height);
-    wl_surface_commit(m_window->surface);
-    // Some compositors, namely Weston, queue buffer release events instead
-    // of sending them immediately.  If a frame event is used, this should
-    // not be a problem.  Without a frame event, we need to send a sync
-    // request to ensure that they get flushed.
-    wl_callback_destroy(wl_display_sync(m_display));
-    wl_display_flush(m_display);
-    fronted.push_back(wnb);
+    if (wnb) {
+        assert(wnb->busy == 1);
 
-    m_window->attached_width = wnb->width;
-    m_window->attached_height = wnb->height;
+        if (!wnb->wlbuffer) {
+            wnb->init(m_android_wlegl, m_display, wl_queue);
+            TRACE("%p add listener with %p inside", wnb, wnb->wlbuffer);
+            wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
+        }
+
+        wl_surface_attach(wl_surface_wrapper, wnb->wlbuffer, 0, 0);
+
+        m_window->attached_width = wnb->width;
+        m_window->attached_height = wnb->height;
+
+        fronted.push_back(wnb);
+    }
+
+    // If the compositor doesn't support damage_buffer, we deliberately
+    // ignore the damage region and post maximum damage, due to
+    // https://bugs.freedesktop.org/78190
+    if (wl_proxy_get_version((struct wl_proxy *) wl_surface_wrapper) >=
+        WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION) {
+        if (m_damage_n_rects > 0 && m_window->attached_height > 0) {
+            for (size_t i = 0; i < m_damage_n_rects; i++) {
+                const android_native_rect_t *rect = &m_damage_rects[i];
+                wl_surface_damage_buffer(wl_surface_wrapper,
+                                         rect->left, m_window->attached_height - rect->top - rect->bottom,
+                                         rect->right, rect->bottom);
+            }
+        } else if (wnb) {
+            wl_surface_damage_buffer(wl_surface_wrapper, 0, 0, INT32_MAX, INT32_MAX);
+        }
+    } else if (wnb) {
+        wl_surface_damage(wl_surface_wrapper, 0, 0, INT32_MAX, INT32_MAX);
+    }
+
+    wl_surface_commit(wl_surface_wrapper);
+
+    // If we're not waiting for a frame callback then we'll at least throttle
+    // to a sync callback so that we always give a chance for the compositor to
+    // handle the commit and send a release event before checking for a free buffer.
+    if (this->frame_callback == NULL) {
+        this->frame_callback = wl_display_sync(wl_dpy_wrapper);
+        wl_callback_add_listener(this->frame_callback, &frame_listener, this);
+    }
+
+    wl_display_flush(m_display);
 
     // TODO damage areas
     m_damage_rects = NULL;

@@ -55,9 +55,6 @@ extern "C" {
 
 static const char *  (*_eglQueryString)(EGLDisplay dpy, EGLint name) = NULL;
 static __eglMustCastToProperFunctionPointerType (*_eglGetProcAddress)(const char *procname) = NULL;
-static EGLSyncKHR (*_eglCreateSyncKHR)(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list) = NULL;
-static EGLBoolean (*_eglDestroySyncKHR)(EGLDisplay dpy, EGLSyncKHR sync) = NULL;
-static EGLint (*_eglClientWaitSyncKHR)(EGLDisplay dpy, EGLSyncKHR sync, EGLint flags, EGLTimeKHR timeout) = NULL;
 
 struct WaylandDisplay {
 	_EGLDisplay base;
@@ -68,39 +65,14 @@ struct WaylandDisplay {
 	wl_event_queue *queue;
 	wl_registry *registry;
 	android_wlegl *wlegl;
+	wl_display *wl_dpy_wrapper;
+	bool owns_connection;
 };
 
 extern "C" void waylandws_init_module(struct ws_egl_interface *egl_iface)
 {
 	hybris_gralloc_initialize(0);
 	eglplatformcommon_init(egl_iface);
-}
-
-static void _init_egl_funcs(EGLDisplay display)
-{
-	if (_eglQueryString != NULL)
-		return;
-
-	_eglQueryString = (const char * (*)(void*, int))
-			hybris_android_egl_dlsym("eglQueryString");
-	assert(_eglQueryString);
-	_eglGetProcAddress = (__eglMustCastToProperFunctionPointerType (*)(const char *))
-			hybris_android_egl_dlsym("eglGetProcAddress");
-	assert(_eglGetProcAddress);
-
-	const char *extensions = (*_eglQueryString)(display, EGL_EXTENSIONS);
-
-	if (strstr(extensions, "EGL_KHR_fence_sync")) {
-		_eglCreateSyncKHR = (PFNEGLCREATESYNCKHRPROC)
-				(*_eglGetProcAddress)("eglCreateSyncKHR");
-		assert(_eglCreateSyncKHR);
-		_eglDestroySyncKHR = (PFNEGLDESTROYSYNCKHRPROC)
-				(*_eglGetProcAddress)("eglDestroySyncKHR");
-		assert(_eglDestroySyncKHR);
-		_eglClientWaitSyncKHR = (PFNEGLCLIENTWAITSYNCKHRPROC)
-				(*_eglGetProcAddress)("eglClientWaitSyncKHR");
-		assert(_eglClientWaitSyncKHR);
-	}
 }
 
 static void registry_handle_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
@@ -134,11 +106,21 @@ static const wl_callback_listener callback_listener = {
 extern "C" _EGLDisplay *waylandws_GetDisplay(EGLNativeDisplayType display)
 {
 	WaylandDisplay *wdpy = new WaylandDisplay;
-	wdpy->wl_dpy = display ? (wl_display *)display : wl_display_connect(NULL);
 	wdpy->wlegl = NULL;
 	wdpy->registry = NULL;
 	wdpy->queue = NULL;
+	wdpy->wl_dpy_wrapper = NULL;
 	wdpy->init_count = 0;
+	wdpy->owns_connection = false;
+	wdpy->wl_dpy = (wl_display *) display;
+	if (!wdpy->wl_dpy) {
+		wdpy->wl_dpy = wl_display_connect(NULL);
+		if (!wdpy->wl_dpy) {
+			fprintf(stderr, "Fatal: failed to connect to the server!");
+			abort();
+		}
+		wdpy->owns_connection = true;
+	}
 
 	return &wdpy->base;
 }
@@ -146,6 +128,8 @@ extern "C" _EGLDisplay *waylandws_GetDisplay(EGLNativeDisplayType display)
 extern "C" void waylandws_releaseDisplay(_EGLDisplay *dpy)
 {
 	WaylandDisplay *wdpy = (WaylandDisplay *)dpy;
+	if (wdpy->owns_connection)
+		wl_display_disconnect(wdpy->wl_dpy);
 	delete wdpy;
 }
 
@@ -155,12 +139,12 @@ extern "C" void waylandws_eglInitialized(_EGLDisplay *dpy)
 
 	if (wdpy->init_count == 0) {
 		wdpy->queue = wl_display_create_queue(wdpy->wl_dpy);
-		wdpy->registry = wl_display_get_registry(wdpy->wl_dpy);
-		wl_proxy_set_queue((wl_proxy *) wdpy->registry, wdpy->queue);
+		wdpy->wl_dpy_wrapper = (struct wl_display *) wl_proxy_create_wrapper(wdpy->wl_dpy);
+		wl_proxy_set_queue((struct wl_proxy *) wdpy->wl_dpy_wrapper, wdpy->queue);
+		wdpy->registry = wl_display_get_registry(wdpy->wl_dpy_wrapper);
 		wl_registry_add_listener(wdpy->registry, &registry_listener, wdpy);
 
-		wl_callback *cb = wl_display_sync(wdpy->wl_dpy);
-		wl_proxy_set_queue((wl_proxy *) cb, wdpy->queue);
+		wl_callback *cb = wl_display_sync(wdpy->wl_dpy_wrapper);
 		wl_callback_add_listener(cb, &callback_listener, wdpy);
 	}
 
@@ -181,9 +165,11 @@ extern "C" void waylandws_Terminate(_EGLDisplay *dpy)
 			assert(ret >= 0);
 			android_wlegl_destroy(wdpy->wlegl);
 			wl_registry_destroy(wdpy->registry);
+			wl_proxy_wrapper_destroy(wdpy->wl_dpy_wrapper);
 			wl_event_queue_destroy(wdpy->queue);
 			wdpy->wlegl = NULL;
 			wdpy->registry = NULL;
+			wdpy->wl_dpy_wrapper = NULL;
 			wdpy->queue = NULL;
 		}
 	}
@@ -278,13 +264,7 @@ extern "C" void waylandws_prepareSwap(EGLDisplay dpy, EGLNativeWindowType win, E
 
 extern "C" void waylandws_finishSwap(EGLDisplay dpy, EGLNativeWindowType win)
 {
-	_init_egl_funcs(dpy);
 	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win);
-	if (_eglCreateSyncKHR) {
-		EGLSyncKHR sync = (*_eglCreateSyncKHR)(dpy, EGL_SYNC_FENCE_KHR, NULL);
-		(*_eglClientWaitSyncKHR)(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
-		(*_eglDestroySyncKHR)(dpy, sync);
-	}
 	window->finishSwap();
 }
 
