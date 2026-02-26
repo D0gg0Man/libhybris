@@ -174,7 +174,7 @@ WaylandNativeWindow::WaylandNativeWindow(struct wl_egl_window *window,
     // This is the default as per the EGL documentation
     this->m_swap_interval = 1;
 
-    m_usage=GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+    m_usage = GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
     pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&cond, NULL);
     m_queueReads = 0;
@@ -229,23 +229,7 @@ int WaylandNativeWindow::setSwapInterval(int interval) {
 
 void WaylandNativeWindow::releaseBuffer(struct wl_buffer *buffer)
 {
-    std::list<WaylandNativeWindowBuffer *>::iterator it = posted.begin();
-
-    for (; it != posted.end(); ++it)
-    {
-        if ((*it)->wlbuffer == buffer)
-            break;
-    }
-
-    if (it != posted.end())
-    {
-        WaylandNativeWindowBuffer* pwnb = *it;
-        posted.erase(it);
-        TRACE("released posted buffer: %p", buffer);
-        pwnb->busy = 0;
-        unlock();
-        return;
-    }
+    std::list<WaylandNativeWindowBuffer *>::iterator it;
 
     it = fronted.begin();
 
@@ -419,6 +403,7 @@ unsigned int WaylandNativeWindow::getUsage() const {
 }
 
 int WaylandNativeWindow::setBuffersFormat(int format) {
+    lock();
     if (format != m_format)
     {
         TRACE("old-format:x%x new-format:x%x", m_format, format);
@@ -427,6 +412,7 @@ int WaylandNativeWindow::setBuffersFormat(int format) {
     } else {
         TRACE("format:x%x", format);
     }
+    unlock();
     return NO_ERROR;
 }
 
@@ -460,7 +446,6 @@ void WaylandNativeWindow::destroyBuffers()
     for (; it!=m_bufList.end(); ++it)
     {
         destroyBuffer(*it);
-        it = m_bufList.erase(it);
     }
     m_bufList.clear();
     m_freeBufs = 0;
@@ -519,6 +504,7 @@ int WaylandNativeWindow::setBufferCount(int cnt) {
 
 
 int WaylandNativeWindow::setBuffersDimensions(int width, int height) {
+    lock();
     if (m_width != width || m_height != height)
     {
         TRACE("old-size:%ix%i new-size:%ix%i", m_width, m_height, width, height);
@@ -528,18 +514,23 @@ int WaylandNativeWindow::setBuffersDimensions(int width, int height) {
     } else {
         TRACE("size:%ix%i", width, height);
     }
+    unlock();
     return NO_ERROR;
 }
 
 int WaylandNativeWindow::setUsage(uint64_t usage) {
-    if ((usage | GRALLOC_USAGE_HW_TEXTURE) != m_usage)
+    usage |= GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+
+    lock();
+    if (usage != m_usage)
     {
         TRACE("old-usage:x%" PRIx64 " new-usage:x%" PRIx64, m_usage, usage);
-        m_usage = usage | GRALLOC_USAGE_HW_TEXTURE;
+        m_usage = usage;
         /* Buffers will be re-allocated when dequeued */
     } else {
         TRACE("usage:x%" PRIx64, usage);
     }
+    unlock();
     return NO_ERROR;
 }
 

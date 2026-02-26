@@ -233,6 +233,19 @@ EGLDisplay hybris_egl_get_real_display(EGLDisplay display)
 	return display;
 }
 
+void hybris_egl_display_release_mappings(void)
+{
+	int i;
+	for (i = 0; i < _EGL_MAX_DISPLAYS; i++)
+	{
+		if (_displayMappings[i])
+		{
+			ws_releaseDisplay(_displayMappings[i]);
+			_displayMappings[i] = NULL;
+		}
+	}
+}
+
 static const char * _defaultEglPlatform()
 {
 	char *egl_platform;
@@ -374,7 +387,8 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 	HYBRIS_DLSYSM(egl, &_eglInitialize, "eglInitialize");
 	EGLBoolean ret = _eglInitialize(hybris_egl_get_real_display(dpy), major, minor);
 	if (ret) {
-		ws_egl_initialized();
+		struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
+		ws_eglInitialized(display);
 	}
 	return ret;
 }
@@ -591,6 +605,7 @@ HYBRIS_EGL_IMPLEMENT_FUNCTION3(egl, EGLBoolean, eglCopyBuffers, EGLDisplay, EGLS
 static EGLImageKHR _my_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list)
 {
 	HYBRIS_DLSYSM(egl, &_eglCreateImageKHR, "eglCreateImageKHR");
+	struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
 	EGLContext newctx = ctx;
 	EGLenum newtarget = target;
 	EGLClientBuffer newbuffer = buffer;
@@ -607,8 +622,9 @@ static EGLImageKHR _my_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum
 	struct egl_image *image;
 	image = malloc(sizeof *image);
 	image->egl_image = eik;
-	image->egl_buffer = buffer;
 	image->target = target;
+	image->ws_dpy = display;
+	image->ws_buffer = newbuffer;
 
 	return (EGLImageKHR)image;
 }

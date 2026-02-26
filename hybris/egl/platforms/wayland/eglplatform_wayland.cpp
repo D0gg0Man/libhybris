@@ -35,7 +35,6 @@
 #include <unistd.h>
 #include <assert.h>
 #include <stdlib.h>
-#include <dlfcn.h>
 extern "C" {
 #include <eglplatformcommon.h>
 };
@@ -52,7 +51,6 @@ extern "C" {
 #include <hybris/gralloc/gralloc.h>
 #include "wayland_window.h"
 #include "logging.h"
-#include "server_wlegl_buffer.h"
 #include "wayland-android-client-protocol.h"
 
 static const char *  (*_eglQueryString)(EGLDisplay dpy, EGLint name) = NULL;
@@ -61,16 +59,11 @@ static EGLSyncKHR (*_eglCreateSyncKHR)(EGLDisplay dpy, EGLenum type, const EGLin
 static EGLBoolean (*_eglDestroySyncKHR)(EGLDisplay dpy, EGLSyncKHR sync) = NULL;
 static EGLint (*_eglClientWaitSyncKHR)(EGLDisplay dpy, EGLSyncKHR sync, EGLint flags, EGLTimeKHR timeout) = NULL;
 
-/* The following function is implemented in libhybris's libEGL.so.
- * However, eglplatform_wayland.so is not linking to libEGL directly,
- * causing undefined symbol errors during loading, if libEGL was not
- * already loaded by some other dependencies. Therefore, we should try
- * to load libEGL at runtime here and resolve this function dynamically */
-typedef struct _EGLDisplay *(*PFNHYBRISEGLDISPLAYGETMAPPINGPROC)(EGLDisplay dpy);
-
 struct WaylandDisplay {
 	_EGLDisplay base;
 
+	// this is protected via mutex in egl.c
+	int init_count;
 	wl_display *wl_dpy;
 	wl_event_queue *queue;
 	wl_registry *registry;
@@ -143,31 +136,57 @@ extern "C" _EGLDisplay *waylandws_GetDisplay(EGLNativeDisplayType display)
 	WaylandDisplay *wdpy = new WaylandDisplay;
 	wdpy->wl_dpy = display ? (wl_display *)display : wl_display_connect(NULL);
 	wdpy->wlegl = NULL;
-	wdpy->queue = wl_display_create_queue(wdpy->wl_dpy);
-	wdpy->registry = wl_display_get_registry(wdpy->wl_dpy);
-	wl_proxy_set_queue((wl_proxy *) wdpy->registry, wdpy->queue);
-	wl_registry_add_listener(wdpy->registry, &registry_listener, wdpy);
-
-	wl_callback *cb = wl_display_sync(wdpy->wl_dpy);
-	wl_proxy_set_queue((wl_proxy *) cb, wdpy->queue);
-	wl_callback_add_listener(cb, &callback_listener, wdpy);
+	wdpy->registry = NULL;
+	wdpy->queue = NULL;
+	wdpy->init_count = 0;
 
 	return &wdpy->base;
+}
+
+extern "C" void waylandws_releaseDisplay(_EGLDisplay *dpy)
+{
+	WaylandDisplay *wdpy = (WaylandDisplay *)dpy;
+	delete wdpy;
+}
+
+extern "C" void waylandws_eglInitialized(_EGLDisplay *dpy)
+{
+	WaylandDisplay *wdpy = (WaylandDisplay *)dpy;
+
+	if (wdpy->init_count == 0) {
+		wdpy->queue = wl_display_create_queue(wdpy->wl_dpy);
+		wdpy->registry = wl_display_get_registry(wdpy->wl_dpy);
+		wl_proxy_set_queue((wl_proxy *) wdpy->registry, wdpy->queue);
+		wl_registry_add_listener(wdpy->registry, &registry_listener, wdpy);
+
+		wl_callback *cb = wl_display_sync(wdpy->wl_dpy);
+		wl_proxy_set_queue((wl_proxy *) cb, wdpy->queue);
+		wl_callback_add_listener(cb, &callback_listener, wdpy);
+	}
+
+	wdpy->init_count++;
 }
 
 extern "C" void waylandws_Terminate(_EGLDisplay *dpy)
 {
 	WaylandDisplay *wdpy = (WaylandDisplay *)dpy;
-	int ret = 0;
-	// We still have the sync callback on flight, wait for it to arrive
-	while (ret == 0 && !wdpy->wlegl) {
-		ret = wl_display_dispatch_queue(wdpy->wl_dpy, wdpy->queue);
+	if (wdpy->init_count > 0) {
+		wdpy->init_count--;
+		if (wdpy->init_count == 0) {
+			int ret = 0;
+			// We still have the sync callback on flight, wait for it to arrive
+			while (ret == 0 && !wdpy->wlegl) {
+				ret = wl_display_dispatch_queue(wdpy->wl_dpy, wdpy->queue);
+			}
+			assert(ret >= 0);
+			android_wlegl_destroy(wdpy->wlegl);
+			wl_registry_destroy(wdpy->registry);
+			wl_event_queue_destroy(wdpy->queue);
+			wdpy->wlegl = NULL;
+			wdpy->registry = NULL;
+			wdpy->queue = NULL;
+		}
 	}
-	assert(ret >= 0);
-	android_wlegl_destroy(wdpy->wlegl);
-	wl_registry_destroy(wdpy->registry);
-	wl_event_queue_destroy(wdpy->queue);
-	delete wdpy;
 }
 
 extern "C" EGLNativeWindowType waylandws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display)
@@ -202,43 +221,6 @@ extern "C" void waylandws_DestroyWindow(EGLNativeWindowType win)
 	window->common.decRef(&window->common);
 }
 
-extern "C" int waylandws_post(EGLNativeWindowType win, void *buffer)
-{
-	struct wl_egl_window *eglwin = (struct wl_egl_window *) win;
-
-	return ((WaylandNativeWindow *) eglwin->driver_private)->postBuffer((ANativeWindowBuffer *) buffer);
-}
-
-/**
- * Loads libhybris's libEGL at runtime to call hybris_egl_display_get_mapping()
- */
-static struct _EGLDisplay *_hybris_egl_display_get_mapping(EGLDisplay dpy)
-{
-	static void *libEGL_handle = NULL;
-	static PFNHYBRISEGLDISPLAYGETMAPPINGPROC hybris_egl_display_get_mapping_fn = NULL;
-
-	if (!libEGL_handle) {
-		dlerror();  // cleanup error buffer
-		libEGL_handle = dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
-		if (!libEGL_handle) {
-			HYBRIS_ERROR("ERROR: Failed to dlopen libEGL! %s", dlerror());
-			abort();
-		}
-	}
-
-	if (!hybris_egl_display_get_mapping_fn) {
-		dlerror();  // cleanup error buffer
-		hybris_egl_display_get_mapping_fn = (PFNHYBRISEGLDISPLAYGETMAPPINGPROC)dlsym(
-			libEGL_handle, "hybris_egl_display_get_mapping");
-		if (!hybris_egl_display_get_mapping_fn) {
-			HYBRIS_ERROR("ERROR: Cannot resolve 'hybris_egl_display_get_mapping' in libEGL! %s", dlerror());
-			abort();
-		}
-	}
-	
-	return hybris_egl_display_get_mapping_fn(dpy);
-}
-
 extern "C" wl_buffer *waylandws_createWlBuffer(EGLDisplay dpy, EGLImageKHR image)
 {
 	egl_image *img = reinterpret_cast<egl_image *>(image);
@@ -248,9 +230,9 @@ extern "C" wl_buffer *waylandws_createWlBuffer(EGLDisplay dpy, EGLImageKHR image
 	    return NULL;
 	}
 	if (img->target == EGL_WAYLAND_BUFFER_WL) {
-		WaylandDisplay *wdpy = (WaylandDisplay *)_hybris_egl_display_get_mapping(dpy);
-		server_wlegl_buffer *buf = server_wlegl_buffer_from((wl_resource *)img->egl_buffer);
-		WaylandNativeWindowBuffer wnb(buf->buf);
+		WaylandDisplay *wdpy = (WaylandDisplay *)img->ws_dpy;
+		ANativeWindowBuffer *buf = (ANativeWindowBuffer *)img->ws_buffer;
+		WaylandNativeWindowBuffer wnb(buf);
 		// The buffer will be managed by the app, so pass NULL as the queue so that
 		// it will be assigned to the default queue
 		wnb.wlbuffer_from_native_handle(wdpy->wlegl, wdpy->wl_dpy, NULL);
@@ -262,15 +244,10 @@ extern "C" wl_buffer *waylandws_createWlBuffer(EGLDisplay dpy, EGLImageKHR image
 
 extern "C" __eglMustCastToProperFunctionPointerType waylandws_eglGetProcAddress(const char *procname)
 {
-	if (strcmp(procname, "eglHybrisWaylandPostBuffer") == 0)
-	{
-		return (__eglMustCastToProperFunctionPointerType) waylandws_post;
-	}
-	else if (strcmp(procname, "eglCreateWaylandBufferFromImageWL") == 0)
+	if (strcmp(procname, "eglCreateWaylandBufferFromImageWL") == 0)
     {
         return (__eglMustCastToProperFunctionPointerType) waylandws_createWlBuffer;
     }
-	else
 	return eglplatformcommon_eglGetProcAddress(procname);
 }
 
@@ -329,6 +306,8 @@ struct ws_module ws_module_info = {
 	waylandws_prepareSwap,
 	waylandws_finishSwap,
 	waylandws_setSwapInterval,
+	waylandws_releaseDisplay,
+	waylandws_eglInitialized,
 };
 
 
