@@ -387,6 +387,12 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 	if (ret) {
 		struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
 		ws_eglInitialized(display);
+
+		if (major)
+			*major = 1;
+		if (minor)
+			*minor = 5;
+
 	}
 	return ret;
 }
@@ -424,6 +430,9 @@ const char * eglQueryString(EGLDisplay dpy, EGLint name)
 		return ret;
 	}
 #endif
+
+	if (name == EGL_VERSION)
+		return "1.5 Android META-EGL";
 
 	return ws_eglQueryString(hybris_egl_get_real_display(dpy), name, _eglQueryString);
 }
