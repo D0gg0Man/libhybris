@@ -48,7 +48,8 @@ DEFAULT_CONFIGURATION = \
 	--enable-property-cache \
 	--enable-experimental \
 	--enable-glvnd \
-	--enable-clicd
+	--enable-clicd \
+	--enable-vulkan-x11-stubs
 ARCH_CONFIGURATION =
 
 ifeq ($(DEB_HOST_ARCH),$(findstring $(DEB_HOST_ARCH), armhf))
