@@ -316,6 +316,9 @@ EGLDisplay __eglHybrisGetPlatformDisplayCommon(EGLenum platform,
 			break;
 #endif
 
+		case 0x31D7: /* EGL_PLATFORM_GBM_KHR - route to drmadapter platform */
+			hybris_ws = "drmadapter";
+			break;
 		default:
 			__eglHybrisSetError(EGL_BAD_PARAMETER);
 			return EGL_NO_DISPLAY;
@@ -890,8 +893,20 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute
 {
 	HYBRIS_DLSYSM(egl, &_eglGetConfigAttrib, "eglGetConfigAttrib");
 	struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
-
-	return (*_eglGetConfigAttrib)(display->dpy, config, attribute, value);
+	EGLBoolean ret = (*_eglGetConfigAttrib)(display->dpy, config, attribute, value);
+	/* Only remap formats for drmadapter platform (GNOME Mali) */
+	const char *plat = getenv("HYBRIS_EGLPLATFORM");
+	if (ret && attribute == EGL_NATIVE_VISUAL_ID && value && plat && strcmp(plat, "drmadapter") == 0) {
+		EGLint alpha = 0;
+		(*_eglGetConfigAttrib)(display->dpy, config, EGL_ALPHA_SIZE, &alpha);
+		switch (*value) {
+			case 1: *value = alpha > 0 ? 0x34324241 : 0x34324258; break;
+			case 5: *value = alpha > 0 ? 0x34325241 : 0x34325258; break;
+			case 4: *value = 0x36314752; break;
+			default: *value = 0x34324258; break;
+		}
+	}
+	return ret;
 }
 
 // vim:ts=4:sw=4:noexpandtab
