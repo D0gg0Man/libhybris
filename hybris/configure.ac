@@ -336,6 +336,7 @@ AC_CONFIG_FILES([
 	egl/platforms/fbdev/Makefile
 	egl/platforms/wayland/Makefile
 	egl/platforms/hwcomposer/Makefile
+	egl/platforms/drmadapter/Makefile
 	egl/platforms/hwcomposer/hwcomposer-egl.pc
 	glesv1/glesv1_cm.pc
 	glesv1/Makefile
