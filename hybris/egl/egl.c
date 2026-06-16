@@ -34,6 +34,7 @@
 #include "helper.h"
 #include <assert.h>
 
+#include <libdrm/drm_fourcc.h>
 
 #include <hybris/common/binding.h>
 #include <stdlib.h>
@@ -316,7 +317,7 @@ EGLDisplay __eglHybrisGetPlatformDisplayCommon(EGLenum platform,
 			break;
 #endif
 
-		case 0x31D7: /* EGL_PLATFORM_GBM_KHR - route to drmadapter platform */
+		case EGL_PLATFORM_GBM_KHR:
 			hybris_ws = "drmadapter";
 			break;
 		default:
@@ -894,16 +895,29 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute
 	HYBRIS_DLSYSM(egl, &_eglGetConfigAttrib, "eglGetConfigAttrib");
 	struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
 	EGLBoolean ret = (*_eglGetConfigAttrib)(display->dpy, config, attribute, value);
-	/* Only remap formats for drmadapter platform (GNOME Mali) */
+
+	/* Only remap formats for drmadapter platform */
 	const char *plat = getenv("HYBRIS_EGLPLATFORM");
 	if (ret && attribute == EGL_NATIVE_VISUAL_ID && value && plat && strcmp(plat, "drmadapter") == 0) {
 		EGLint alpha = 0;
 		(*_eglGetConfigAttrib)(display->dpy, config, EGL_ALPHA_SIZE, &alpha);
 		switch (*value) {
-			case 1: *value = alpha > 0 ? 0x34324241 : 0x34324258; break;
-			case 5: *value = alpha > 0 ? 0x34325241 : 0x34325258; break;
-			case 4: *value = 0x36314752; break;
-			default: *value = 0x34324258; break;
+		case HAL_PIXEL_FORMAT_RGBA_8888:
+		case HAL_PIXEL_FORMAT_RGBX_8888:
+			*value = alpha > 0 ? DRM_FORMAT_ABGR8888 : DRM_FORMAT_XBGR8888;
+			break;
+
+		case HAL_PIXEL_FORMAT_BGRA_8888:
+			*value = alpha > 0 ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
+			break;
+
+		case HAL_PIXEL_FORMAT_RGB_565:
+			*value = DRM_FORMAT_RGB565;
+			break;
+
+		default:
+			*value = DRM_FORMAT_XBGR8888;
+			break;
 		}
 	}
 	return ret;
