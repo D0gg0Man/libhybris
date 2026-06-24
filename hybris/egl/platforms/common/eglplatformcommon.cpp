@@ -343,5 +343,22 @@ extern "C" const char *eglplatformcommon_eglQueryString(EGLDisplay dpy, EGLint n
 		ret = eglextensionsbuf;
 	}
 #endif
+	if (ret && name == EGL_EXTENSIONS && getenv("HYBRIS_WLROOTS"))
+	{
+		/*
+		 * The Mali driver supports these but the Android libEGL loader filters
+		 * them out of the display extension string. wlroots (phoc) requires
+		 * EGL_KHR_no_config_context + EGL_KHR_surfaceless_context for its GLES2
+		 * renderer and uses EGL_EXT_image_dma_buf_import for client buffers.
+		 * Deliberately NOT advertising ..._modifiers: that makes wlroots call
+		 * eglQueryDmaBufFormatsEXT (which libhybris doesn't provide) and abort.
+		 */
+		static char wlrextbuf[2560];
+		snprintf(wlrextbuf, sizeof(wlrextbuf) - 1, "%s %s", ret,
+			"EGL_KHR_no_config_context EGL_KHR_surfaceless_context "
+			"EGL_EXT_image_dma_buf_import"
+		);
+		ret = wlrextbuf;
+	}
 	return ret;
 }

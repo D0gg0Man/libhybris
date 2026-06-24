@@ -96,6 +96,24 @@ static const char *
 __eglGLVNDGetVendorString(int name)
 {
     if (name == __EGL_VENDOR_STRING_PLATFORM_EXTENSIONS) {
+        /*
+         * When libhybris is the only loaded glvnd vendor (wlroots/phoc on
+         * drmadapter, HYBRIS_WLROOTS=1), advertise EGL_EXT_platform_base
+         * ourselves -- glvnd normally inherits it from mesa, which isn't loaded
+         * in that configuration, and wlroots needs it for
+         * eglGetPlatformDisplayEXT. Not advertised otherwise, to avoid the
+         * duplicate that trips glvnd's UnionExtensionStrings assertion when mesa
+         * is also present (the GNOME/mutter case).
+         */
+        if (getenv("HYBRIS_WLROOTS")) {
+            return
+                "EGL_KHR_platform_android"
+                " EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_EXT_platform_base"
+#ifdef WANT_WAYLAND
+                " EGL_EXT_platform_wayland EGL_KHR_platform_wayland"
+#endif
+                ;
+        }
         return
             "EGL_KHR_platform_android"
             " EGL_KHR_platform_gbm EGL_MESA_platform_gbm"
