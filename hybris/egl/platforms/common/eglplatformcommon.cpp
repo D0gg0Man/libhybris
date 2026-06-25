@@ -234,6 +234,47 @@ extern "C" EGLBoolean eglplatformcommon_eglHybrisReleaseNativeBuffer(EGLClientBu
 
 
 
+/*
+ * HYBRIS_WLROOTS presentation bridge.
+ *
+ * wlroots renders into a gbm_hybris (gralloc) buffer, then asks the DRM backend
+ * to scan it out via an atomic KMS commit. There is no drmadapter EGL window
+ * surface in this path, so drmadapter's present_cb (which mutter's eglSwapBuffers
+ * drives) is never called and nothing reaches HWC2. libdrm-hybris's faked KMS
+ * commit calls eglplatformcommon_present_gralloc() instead, which presents the
+ * RemoteWindowBuffer we already built when wlroots imported that buffer as an EGL
+ * image. The HWC2 device/display/layer are owned and initialised by the
+ * drmadapter EGL platform; we reach them through its exported getters and drive
+ * them with the hwc2 compat C ABI (resolved at runtime to avoid a link dep).
+ */
+#define WLR_ANWB_MAX 8
+static struct { buffer_handle_t handle; void *anwb; } g_wlr_anwb[WLR_ANWB_MAX];
+static int g_wlr_anwb_n = 0;
+static void wlr_anwb_store(buffer_handle_t h, void *anwb)
+{
+	for (int i = 0; i < g_wlr_anwb_n; i++)
+		if (g_wlr_anwb[i].handle == h) { g_wlr_anwb[i].anwb = anwb; return; }
+	if (g_wlr_anwb_n < WLR_ANWB_MAX) {
+		g_wlr_anwb[g_wlr_anwb_n].handle = h;
+		g_wlr_anwb[g_wlr_anwb_n].anwb = anwb;
+		g_wlr_anwb_n++;
+	}
+}
+static void *wlr_anwb_find(buffer_handle_t h)
+{
+	for (int i = 0; i < g_wlr_anwb_n; i++)
+		if (g_wlr_anwb[i].handle == h) return g_wlr_anwb[i].anwb;
+	return NULL;
+}
+
+/* Return the RemoteWindowBuffer (as ANativeWindowBuffer*) for a committed
+ * gralloc handle, or NULL. Called by the drmadapter EGL platform (linked
+ * directly against us) to present the wlroots-rendered buffer to HWC2. */
+extern "C" void *eglplatformcommon_wlr_lookup_anwb(buffer_handle_t handle)
+{
+	return wlr_anwb_find(handle);
+}
+
 extern "C" void
 eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
 {
@@ -305,6 +346,9 @@ eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClien
 				GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER,
 				handle);
 			anwb->common.incRef(&anwb->common);
+			/* Remember handle -> anwb so libdrm-hybris's faked KMS commit can
+			 * present this exact buffer to HWC2 (see present_gralloc above). */
+			wlr_anwb_store(handle, anwb);
 			*buffer = (EGLClientBuffer)(ANativeWindowBuffer *) anwb;
 			*target = EGL_NATIVE_BUFFER_ANDROID;
 			*ctx = EGL_NO_CONTEXT;
