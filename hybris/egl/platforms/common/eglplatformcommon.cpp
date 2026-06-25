@@ -263,6 +263,54 @@ eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClien
 		*attrib_list = NULL;
 	}
 #endif
+
+#ifndef EGL_LINUX_DMA_BUF_EXT
+#define EGL_LINUX_DMA_BUF_EXT          0x3270
+#define EGL_LINUX_DRM_FOURCC_EXT       0x3271
+#define EGL_DMA_BUF_PLANE0_FD_EXT      0x3272
+#define EGL_DMA_BUF_PLANE0_PITCH_EXT   0x3274
+#endif
+	/*
+	 * HYBRIS_WLROOTS: wlroots imports gbm_hybris buffers as generic Linux
+	 * dmabufs (EGL_LINUX_DMA_BUF_EXT), but the Mali EGL only imports gralloc
+	 * ANativeWindowBuffers. Recover the gralloc handle behind the dmabuf fd
+	 * (libgbm-hybris registered it in libdrm-hybris's gmap) and re-import it as
+	 * an Android native buffer.
+	 */
+	if (*target == EGL_LINUX_DMA_BUF_EXT && *attrib_list && getenv("HYBRIS_WLROOTS")) {
+		int width = 0, height = 0, fd = -1, stride = 0, fourcc = 0;
+		for (const EGLint *a = *attrib_list; a[0] != EGL_NONE; a += 2) {
+			switch (a[0]) {
+			case EGL_WIDTH:                    width  = a[1]; break;
+			case EGL_HEIGHT:                   height = a[1]; break;
+			case EGL_LINUX_DRM_FOURCC_EXT:     fourcc = a[1]; break;
+			case EGL_DMA_BUF_PLANE0_FD_EXT:    fd     = a[1]; break;
+			case EGL_DMA_BUF_PLANE0_PITCH_EXT: stride = a[1]; break;
+			}
+		}
+		static buffer_handle_t (*lookup)(uint32_t) = NULL;
+		if (!lookup)
+			lookup = (buffer_handle_t(*)(uint32_t))dlsym(RTLD_DEFAULT, "drm_shim_lookup_gralloc");
+		buffer_handle_t handle = (lookup && fd >= 0) ? lookup((uint32_t)fd) : NULL;
+		if (handle && width > 0 && height > 0) {
+			int hal, bpp = 4;
+			switch (fourcc) {
+			case 0x34325258: case 0x34325241: hal = HAL_PIXEL_FORMAT_BGRA_8888; break; /* XR24/AR24 */
+			case 0x34324258: case 0x34324241: hal = HAL_PIXEL_FORMAT_RGBA_8888; break; /* XB24/AB24 */
+			case 0x36314752: hal = HAL_PIXEL_FORMAT_RGB_565; bpp = 2; break;           /* RG16 */
+			default:                          hal = HAL_PIXEL_FORMAT_RGBA_8888; break;
+			}
+			RemoteWindowBuffer *anwb = new RemoteWindowBuffer(width, height,
+				stride / bpp, hal,
+				GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER,
+				handle);
+			anwb->common.incRef(&anwb->common);
+			*buffer = (EGLClientBuffer)(ANativeWindowBuffer *) anwb;
+			*target = EGL_NATIVE_BUFFER_ANDROID;
+			*ctx = EGL_NO_CONTEXT;
+			*attrib_list = NULL;
+		}
+	}
 }
 
 extern "C" __eglMustCastToProperFunctionPointerType eglplatformcommon_eglGetProcAddress(const char *procname)
