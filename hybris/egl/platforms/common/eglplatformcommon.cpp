@@ -275,6 +275,41 @@ extern "C" void *eglplatformcommon_wlr_lookup_anwb(buffer_handle_t handle)
 	return wlr_anwb_find(handle);
 }
 
+/* The EGLDisplay wlroots is using (captured while its context is current in the
+ * dmabuf import bridge). drmadapter's HWC2 blitter must create its EGLImage on
+ * THIS display handle -- importing the buffer on a different handle (e.g. a
+ * fresh eglGetDisplay(EGL_DEFAULT_DISPLAY)) fails with EGL_BAD_PARAMETER. */
+static void *g_wlr_egl_display = NULL;
+static void *g_wlr_egl_context = NULL;
+extern "C" void *eglplatformcommon_wlr_display(void)
+{
+	return g_wlr_egl_display;
+}
+/* wlroots' render EGLContext (captured while current in the import bridge). The
+ * drmadapter blitter makes it current + glFinish() before sampling, so wlroots'
+ * GPU render into the buffer is complete (wlroots uses explicit syncobj sync,
+ * not IN_FENCE_FD, so the shim can't wait on a plain fence fd otherwise). */
+extern "C" void *eglplatformcommon_wlr_context(void)
+{
+	return g_wlr_egl_context;
+}
+
+/* Create a FRESH RemoteWindowBuffer wrapping the same gralloc handle as the
+ * cached one. The Mali EGL rejects a second eglCreateImageKHR on an
+ * ANativeWindowBuffer it has already imported (EGL_BAD_PARAMETER), so the
+ * drmadapter blitter needs its own buffer object (same underlying gralloc
+ * memory) to import and sample from. */
+extern "C" void *eglplatformcommon_wlr_make_anwb(buffer_handle_t handle)
+{
+	ANativeWindowBuffer *o = (ANativeWindowBuffer *)wlr_anwb_find(handle);
+	if (!o)
+		return NULL;
+	RemoteWindowBuffer *anwb = new RemoteWindowBuffer(o->width, o->height,
+		o->stride, o->format, o->usage, handle);
+	anwb->common.incRef(&anwb->common);
+	return (void *)(ANativeWindowBuffer *)anwb;
+}
+
 extern "C" void
 eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
 {
@@ -347,8 +382,11 @@ eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClien
 				handle);
 			anwb->common.incRef(&anwb->common);
 			/* Remember handle -> anwb so libdrm-hybris's faked KMS commit can
-			 * present this exact buffer to HWC2 (see present_gralloc above). */
+			 * present this exact buffer to HWC2 (see present_gralloc above).
+			 * Also capture wlroots' EGLDisplay (current here) for the blitter. */
 			wlr_anwb_store(handle, anwb);
+			if (!g_wlr_egl_display) g_wlr_egl_display = (void *)eglGetCurrentDisplay();
+			if (!g_wlr_egl_context) g_wlr_egl_context = (void *)eglGetCurrentContext();
 			*buffer = (EGLClientBuffer)(ANativeWindowBuffer *) anwb;
 			*target = EGL_NATIVE_BUFFER_ANDROID;
 			*ctx = EGL_NO_CONTEXT;
