@@ -68,6 +68,12 @@ void HWCNativeWindowDestroy(struct ANativeWindow *window);
  */
 int HWCNativeBufferGetFence(struct ANativeWindowBuffer *buf);
 
+/**
+ * Sets the number of buffers in the window's swap chain (default 2).
+ * 3 avoids redraw-while-scanout when the consumer latches asynchronously.
+ */
+int HWCNativeWindowSetBufferCount(struct ANativeWindow *window, int count);
+
 /** Set the current fence FD on a buffer.
  *
  * The buffer must be a buffer passed from the HWC layer trough the present

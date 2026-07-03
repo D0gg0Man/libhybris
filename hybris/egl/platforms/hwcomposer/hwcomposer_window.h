@@ -70,7 +70,10 @@ protected:
     virtual int setUsage(uint64_t usage);
     virtual int setBuffersFormat(int format);
     virtual int setBuffersDimensions(int width, int height);
+public:
+    /* public so the C wrapper (HWCNativeWindowSetBufferCount) can reach it */
     virtual int setBufferCount(int cnt);
+protected:
     virtual void present(HWComposerNativeWindowBuffer *buffer) = 0;
 
 private:

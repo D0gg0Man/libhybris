@@ -87,6 +87,12 @@ extern "C" int HWCNativeBufferGetFence(struct ANativeWindowBuffer *buf)
     return static_cast<_BufferFenceAccessor *>(buf)->get();
 }
 
+extern "C" int HWCNativeWindowSetBufferCount(struct ANativeWindow *window, int count)
+{
+	HWComposerNativeWindow *native = static_cast<HWComposerNativeWindow *>(window);
+	return native->setBufferCount(count);
+}
+
 extern "C" void HWCNativeBufferSetFence(struct ANativeWindowBuffer *buf, int fd)
 {
     static_cast<_BufferFenceAccessor *>(buf)->set(fd);
@@ -487,10 +493,18 @@ void HWComposerNativeWindow::allocateBuffers()
     // m_mutex, so we do this without locking here.
     TRACE("cnt=%d", m_bufferCount);
 
+    /* HYBRIS_HWCW_LINEAR=1: force CPU-usage bits into the allocation so gralloc
+     * picks a LINEAR (non-AFBC) layout. On some Mali/MTK combos an AFBC window
+     * buffer renders fine in GL but scans out BLACK (the display path treats it
+     * as linear) -- a per-allocation lottery. Used by the drmadapter blitter. */
+    uint64_t alloc_usage = m_usage;
+    if (getenv("HYBRIS_HWCW_LINEAR"))
+        alloc_usage |= 0x3 /* SW_READ_OFTEN */ | 0x30 /* SW_WRITE_OFTEN */;
+
     for(unsigned int i = 0; i < m_bufferCount; i++)
     {
         HWComposerNativeWindowBuffer *b
-         = new HWComposerNativeWindowBuffer(m_width, m_height, m_bufFormat, m_usage);
+         = new HWComposerNativeWindowBuffer(m_width, m_height, m_bufFormat, alloc_usage);
 
         b->common.incRef(&b->common);
 
