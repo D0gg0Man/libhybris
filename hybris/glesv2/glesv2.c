@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <hybris/common/binding.h>
 
@@ -32,6 +33,45 @@
 
 // Android always uses libGLESv2.so for both OpenGL ES 2.0 and OpenGL ES 3.x
 HYBRIS_LIBRARY_INITIALIZE(glesv2, getenv("LIBGLESV2") ? getenv("LIBGLESV2") : "libGLESv2.so");
+
+/* When HYBRIS_GLES_SYNC_COMPILE is set, force a glFinish after shader
+ * compile/link. The Mali (Valhall) driver compiles/links shaders asynchronously
+ * on an internal worker thread; a heavy multithreaded client (KWin) that keeps
+ * issuing GL on the main thread while that worker runs corrupts driver/heap
+ * state (shader link fails with an empty infolog, epoxy's cached state gets
+ * scribbled). Serialising the compile with a glFinish makes the worker complete
+ * before the caller continues. Env-gated so only the KWin session pays the cost;
+ * phosh/GNOME are untouched. */
+static int hybris_gles_sync_compile(void)
+{
+    static int e = -1;
+    if (e < 0) e = getenv("HYBRIS_GLES_SYNC_COMPILE") ? 1 : 0;
+    return e;
+}
+void glCompileShader(GLuint shader)
+{
+    static void (*f)(GLuint) FP_ATTRIB = NULL;
+    static void (*fin)(void) FP_ATTRIB = NULL;
+    HYBRIS_DLSYSM(glesv2, &f, "glCompileShader");
+    f(shader);
+    if (hybris_gles_sync_compile()) {
+        HYBRIS_DLSYSM(glesv2, &fin, "glFinish");
+        if (fin) fin();
+    }
+}
+void glLinkProgram(GLuint program)
+{
+    static void (*f)(GLuint) FP_ATTRIB = NULL;
+    static void (*fin)(void) FP_ATTRIB = NULL;
+    HYBRIS_DLSYSM(glesv2, &f, "glLinkProgram");
+    f(program);
+    if (hybris_gles_sync_compile()) {
+        if (getenv("HYBRIS_GLES_DEBUG"))
+            fprintf(stderr, "hybris-glesv2: glLinkProgram(%u)+glFinish\n", program);
+        HYBRIS_DLSYSM(glesv2, &fin, "glFinish");
+        if (fin) fin();
+    }
+}
 
 HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glActiveTexture, GLenum);
 HYBRIS_IMPLEMENT_VOID_FUNCTION2(glesv2, glAttachShader, GLuint, GLuint);
@@ -53,7 +93,6 @@ HYBRIS_IMPLEMENT_VOID_FUNCTION4(glesv2, glClearColor, GLfloat, GLfloat, GLfloat,
 HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glClearDepthf, GLfloat);
 HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glClearStencil, GLint);
 HYBRIS_IMPLEMENT_VOID_FUNCTION4(glesv2, glColorMask, GLboolean, GLboolean, GLboolean, GLboolean);
-HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glCompileShader, GLuint);
 HYBRIS_IMPLEMENT_VOID_FUNCTION8(glesv2, glCompressedTexImage2D, GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
 HYBRIS_IMPLEMENT_VOID_FUNCTION9(glesv2, glCompressedTexSubImage2D, GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void *);
 HYBRIS_IMPLEMENT_VOID_FUNCTION8(glesv2, glCopyTexImage2D, GLenum, GLint, GLenum, GLint, GLint, GLsizei, GLsizei, GLint);
@@ -122,7 +161,6 @@ HYBRIS_IMPLEMENT_FUNCTION1(glesv2, GLboolean, glIsRenderbuffer, GLuint);
 HYBRIS_IMPLEMENT_FUNCTION1(glesv2, GLboolean, glIsShader, GLuint);
 HYBRIS_IMPLEMENT_FUNCTION1(glesv2, GLboolean, glIsTexture, GLuint);
 HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glLineWidth, GLfloat);
-HYBRIS_IMPLEMENT_VOID_FUNCTION1(glesv2, glLinkProgram, GLuint);
 HYBRIS_IMPLEMENT_VOID_FUNCTION2(glesv2, glPixelStorei, GLenum, GLint);
 HYBRIS_IMPLEMENT_VOID_FUNCTION2(glesv2, glPolygonOffset, GLfloat, GLfloat);
 HYBRIS_IMPLEMENT_VOID_FUNCTION7(glesv2, glReadPixels, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);

@@ -217,6 +217,49 @@ static int hybris_check_android_shared_mutex(uintptr_t mutex_addr)
     return 0;
 }
 
+/*
+ * A libhybris-managed mutex holds one of: a small bionic init value
+ * (<= ANDROID_TOP_ADDR_VALUE_MUTEX), a shared-memory handle (top of the
+ * address space, see hybris_is_pointer_in_shm), or a canonical user-space
+ * pointer to the real glibc mutex we allocated. On aarch64 a canonical
+ * user-space pointer never has any of bits [63:48] set.
+ *
+ * Some Android libraries operate a pthread_mutex_t through their own
+ * statically-linked bionic pthread code (observed with the Mali GLES driver's
+ * ES3 render paths), leaving non-canonical bionic lock state in the first word
+ * -- e.g. 0xffffffff00000003. Reading that word as a glibc mutex pointer
+ * dereferences unmapped memory and crashes the whole process. Treat any value
+ * that is neither a small init value, a shm handle, nor a canonical pointer as
+ * an uninitialized bionic mutex so we (re)allocate a real glibc mutex for it.
+ * This never fires for correctly hybris-managed mutexes (phosh/GNOME etc.),
+ * whose stored pointers are always canonical.
+ */
+/* A value whose bits [63:48] are set is not a canonical aarch64 user-space
+ * pointer, so it cannot be a glibc mutex we allocated. It is bionic lock state
+ * left by an Android library operating the mutex through its own pthread code
+ * (observed with the Mali GLES driver). Such a mutex is NOT libhybris-managed;
+ * reading it as a glibc pointer crashes. shm handles live at the very top of the
+ * address space and are handled separately. */
+static int hybris_mutex_is_foreign(uintptr_t value)
+{
+    if ((value >> 48) != 0 && !hybris_is_pointer_in_shm((void *) value)) {
+        static int dbg = -1;
+        if (dbg < 0) dbg = getenv("HYBRIS_MUTEX_DEBUG") ? 1 : 0;
+        if (dbg) {
+            static unsigned long n = 0;
+            fprintf(stderr, "hybris: foreign mutex value 0x%lx (#%lu) -> no-op\n",
+                    (unsigned long)value, ++n);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int hybris_mutex_needs_init(uintptr_t value)
+{
+    return value <= ANDROID_TOP_ADDR_VALUE_MUTEX;
+}
+
 static int hybris_check_android_shared_cond(uintptr_t cond_addr)
 {
     /* If not initialized or initialized by Android, it should contain a low
@@ -418,12 +461,50 @@ static pid_t _hybris_hook_gettid(void)
  *
  * */
 
+/* True if addr lies in libGLES_mali.so's executable mapping. Used to force the
+ * Mali GLES driver single-threaded (LIBHYBRIS_MALI_SINGLE_THREAD): its worker
+ * threads operate mutexes with inlined bionic semantics that clash with our
+ * glibc mutex translation, corrupting state under a heavy client (KWin). */
+static int hybris_addr_in_mali(void *addr)
+{
+    static uintptr_t lo = 0, hi = 0;
+    static int scanned = 0;
+    if (!scanned) {
+        scanned = 1;
+        FILE *f = fopen("/proc/self/maps", "r");
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                if (strstr(line, "libGLES_mali.so") && strstr(line, "r-x")) {
+                    unsigned long a, b;
+                    if (sscanf(line, "%lx-%lx", &a, &b) == 2) {
+                        if (lo == 0 || (uintptr_t)a < lo) lo = (uintptr_t)a;
+                        if ((uintptr_t)b > hi) hi = (uintptr_t)b;
+                    }
+                }
+            }
+            fclose(f);
+        }
+    }
+    uintptr_t p = (uintptr_t) addr;
+    return lo != 0 && p >= lo && p < hi;
+}
+
 static int _hybris_hook_pthread_create(pthread_t *thread, const pthread_attr_t *__attr,
                              void *(*start_routine)(void*), void *arg)
 {
     pthread_attr_t *realattr = NULL;
 
     TRACE_HOOK("thread %p attr %p", thread, __attr);
+
+    static int mali_single = -1;
+    if (mali_single < 0) mali_single = getenv("LIBHYBRIS_MALI_SINGLE_THREAD") ? 1 : 0;
+    if (mali_single && hybris_addr_in_mali((void *) start_routine)) {
+        if (getenv("HYBRIS_MUTEX_DEBUG"))
+            fprintf(stderr, "hybris: refusing Mali worker thread start=%p (single-threaded)\n",
+                    (void *) start_routine);
+        return EAGAIN;
+    }
 
     if (__attr != NULL)
         realattr = (pthread_attr_t *) *(uintptr_t *) __attr;
@@ -703,10 +784,18 @@ static int _hybris_hook_pthread_mutex_destroy(pthread_mutex_t *__mutex)
     if (!__mutex)
         return EINVAL;
 
-    pthread_mutex_t *realmutex = (pthread_mutex_t *) *(uintptr_t *) __mutex;
+    uintptr_t value = *(uintptr_t *) __mutex;
+    pthread_mutex_t *realmutex = (pthread_mutex_t *) value;
 
     if (!realmutex)
         return EINVAL;
+
+    /* Never allocated/managed by us (bionic init value or non-canonical bionic
+     * state) -- nothing to destroy or free, just clear it. */
+    if (hybris_mutex_needs_init(value) || hybris_mutex_is_foreign(value)) {
+        *((uintptr_t *)__mutex) = 0;
+        return 0;
+    }
 
     if (!hybris_is_pointer_in_shm((void*)realmutex)) {
         ret = pthread_mutex_destroy(realmutex);
@@ -736,15 +825,24 @@ static int _hybris_hook_pthread_mutex_lock(pthread_mutex_t *__mutex)
         LOGD("Shared mutex with Android, not locking.");
         return 0;
     }
+    if (hybris_mutex_is_foreign(value)) {
+        if (getenv("HYBRIS_MUTEX_DEBUG")) {
+            uint32_t *w = (uint32_t *) __mutex;
+            fprintf(stderr, "hybris: foreign LOCK m=%p self=%p w[0..3]=%08x %08x %08x %08x\n",
+                    (void *) __mutex, (void *)pthread_self(),
+                    w[0], w[1], w[2], w[3]);
+        }
+        return 0;
+    }
 
     pthread_mutex_t *realmutex = (pthread_mutex_t *) value;
     if (hybris_is_pointer_in_shm((void*)value))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)value);
 
-    if (value <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        TRACE("value %p <= ANDROID_TOP_ADDR_VALUE_MUTEX 0x%x",
+    if (hybris_mutex_needs_init(value)) {
+        TRACE("value %p needs init (<= 0x%x)",
               (void*) value, ANDROID_TOP_ADDR_VALUE_MUTEX);
-        realmutex = hybris_alloc_init_mutex(value);
+        realmutex = hybris_alloc_init_mutex(value & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *)__mutex) = (uintptr_t) realmutex;
     }
 
@@ -761,13 +859,15 @@ static int _hybris_hook_pthread_mutex_trylock(pthread_mutex_t *__mutex)
         LOGD("Shared mutex with Android, not try locking.");
         return 0;
     }
+    if (hybris_mutex_is_foreign(value))
+        return 0;
 
     pthread_mutex_t *realmutex = (pthread_mutex_t *) value;
     if (hybris_is_pointer_in_shm((void*)value))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)value);
 
-    if (value <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(value);
+    if (hybris_mutex_needs_init(value)) {
+        realmutex = hybris_alloc_init_mutex(value & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *)__mutex) = (uintptr_t) realmutex;
     }
 
@@ -789,7 +889,7 @@ static int _hybris_hook_pthread_mutex_unlock(pthread_mutex_t *__mutex)
         return 0;
     }
 
-    if (value <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
+    if (hybris_mutex_needs_init(value) || hybris_mutex_is_foreign(value)) {
         LOGD("Trying to unlock a lock that's not locked/initialized"
                " by Hybris, not unlocking.");
         return 0;
@@ -814,11 +914,15 @@ static int _hybris_hook_pthread_mutex_lock_timeout_np(pthread_mutex_t *__mutex, 
         LOGD("Shared mutex with Android, not lock timeout np.");
         return 0;
     }
+    if (hybris_mutex_is_foreign(value))
+        return 0;
 
     realmutex = (pthread_mutex_t *) value;
+    if (hybris_is_pointer_in_shm((void*)value))
+        realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)value);
 
-    if (value <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(value);
+    if (hybris_mutex_needs_init(value)) {
+        realmutex = hybris_alloc_init_mutex(value & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *)__mutex) = (uintptr_t) realmutex;
     }
 
@@ -848,10 +952,14 @@ static int _hybris_hook_pthread_mutex_timedlock(pthread_mutex_t *__mutex,
         LOGD("Shared mutex with Android, not lock timeout np.");
         return 0;
     }
+    if (hybris_mutex_is_foreign(value))
+        return 0;
 
     pthread_mutex_t *realmutex = (pthread_mutex_t *) value;
-    if (value <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(value);
+    if (hybris_is_pointer_in_shm((void*)value))
+        realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)value);
+    if (hybris_mutex_needs_init(value)) {
+        realmutex = hybris_alloc_init_mutex(value & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *)__mutex) = (uintptr_t) realmutex;
     }
 
@@ -992,7 +1100,7 @@ static int _hybris_hook_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t 
     TRACE_HOOK("cond %p mutex %p", cond, mutex);
 
     if (hybris_check_android_shared_cond(cvalue) ||
-        hybris_check_android_shared_mutex(mvalue)) {
+        hybris_check_android_shared_mutex(mvalue) || hybris_mutex_is_foreign(mvalue)) {
         LOGD("Shared condition/mutex with Android, not waiting.");
         return 0;
     }
@@ -1010,8 +1118,8 @@ static int _hybris_hook_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t 
     if (hybris_is_pointer_in_shm((void*)mvalue))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)mvalue);
 
-    if (mvalue <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(mvalue);
+    if (hybris_mutex_needs_init(mvalue)) {
+        realmutex = hybris_alloc_init_mutex(mvalue & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *) mutex) = (uintptr_t) realmutex;
     }
 
@@ -1028,7 +1136,7 @@ static int _hybris_hook_pthread_cond_clockwait(pthread_cond_t *cond, pthread_mut
     TRACE_HOOK("cond %p mutex %p abstime %p", cond, mutex, abstime);
 
     if (hybris_check_android_shared_cond(cvalue) ||
-        hybris_check_android_shared_mutex(mvalue)) {
+        hybris_check_android_shared_mutex(mvalue) || hybris_mutex_is_foreign(mvalue)) {
         LOGD("Shared condition/mutex with Android, not waiting.");
         return 0;
     }
@@ -1046,8 +1154,8 @@ static int _hybris_hook_pthread_cond_clockwait(pthread_cond_t *cond, pthread_mut
     if (hybris_is_pointer_in_shm((void*)mvalue))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)mvalue);
 
-    if (mvalue <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(mvalue);
+    if (hybris_mutex_needs_init(mvalue)) {
+        realmutex = hybris_alloc_init_mutex(mvalue & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *) mutex) = (uintptr_t) realmutex;
     }
 
@@ -1064,7 +1172,7 @@ static int _hybris_hook_pthread_cond_timedwait(pthread_cond_t *cond,
     TRACE_HOOK("cond %p mutex %p abstime %p", cond, mutex, abstime);
 
     if (hybris_check_android_shared_cond(cvalue) ||
-         hybris_check_android_shared_mutex(mvalue)) {
+         hybris_check_android_shared_mutex(mvalue) || hybris_mutex_is_foreign(mvalue)) {
         LOGD("Shared condition/mutex with Android, not waiting.");
         return 0;
     }
@@ -1082,8 +1190,8 @@ static int _hybris_hook_pthread_cond_timedwait(pthread_cond_t *cond,
     if (hybris_is_pointer_in_shm((void*)mvalue))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)mvalue);
 
-    if (mvalue <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(mvalue);
+    if (hybris_mutex_needs_init(mvalue)) {
+        realmutex = hybris_alloc_init_mutex(mvalue & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *) mutex) = (uintptr_t) realmutex;
     }
 
@@ -1100,7 +1208,7 @@ static int _hybris_hook_pthread_cond_timedwait_relative_np(pthread_cond_t *cond,
     TRACE_HOOK("cond %p mutex %p reltime %p", cond, mutex, reltime);
 
     if (hybris_check_android_shared_cond(cvalue) ||
-         hybris_check_android_shared_mutex(mvalue)) {
+         hybris_check_android_shared_mutex(mvalue) || hybris_mutex_is_foreign(mvalue)) {
         LOGD("Shared condition/mutex with Android, not waiting.");
         return 0;
     }
@@ -1118,8 +1226,8 @@ static int _hybris_hook_pthread_cond_timedwait_relative_np(pthread_cond_t *cond,
     if (hybris_is_pointer_in_shm((void*)mvalue))
         realmutex = (pthread_mutex_t *)hybris_get_shmpointer((hybris_shm_pointer_t)mvalue);
 
-    if (mvalue <= ANDROID_TOP_ADDR_VALUE_MUTEX) {
-        realmutex = hybris_alloc_init_mutex(mvalue);
+    if (hybris_mutex_needs_init(mvalue)) {
+        realmutex = hybris_alloc_init_mutex(mvalue & ANDROID_TOP_ADDR_VALUE_MUTEX);
         *((uintptr_t *) mutex) = (uintptr_t) realmutex;
     }
 

@@ -47,6 +47,11 @@ public:
     WaylandNativeWindow(struct wl_egl_window *win, struct wl_display *display, android_wlegl *wlegl);
     ~WaylandNativeWindow();
 
+    /* Route buffers through wl_shm (CPU copy) instead of android_wlegl, for
+     * compositors whose only client-buffer path is wl_shm (KWin software).
+     * Enabled iff shm!=NULL and env HYBRIS_WL_SHM is set. */
+    void enableShm(struct wl_shm *shm);
+
     void lock();
     void unlock();
     void frame();
@@ -103,6 +108,8 @@ private:
     unsigned int m_defaultHeight;
     uint64_t m_usage;
     struct android_wlegl *m_android_wlegl;
+    struct wl_shm *m_shm = NULL;
+    int m_use_shm = 0;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int m_queueReads;

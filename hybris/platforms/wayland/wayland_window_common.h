@@ -46,6 +46,8 @@ public:
         , youngest(0)
         , other(0)
         , creation_callback(0)
+        , shm_data(0)
+        , shm_size(0)
     {}
     WaylandNativeWindowBuffer(ANativeWindowBuffer *other)
     {
@@ -60,6 +62,8 @@ public:
         this->busy = 0;
         this->other = other;
         this->youngest = 0;
+        this->shm_data = NULL;
+        this->shm_size = 0;
     }
 
     struct wl_buffer *wlbuffer;
@@ -68,9 +72,21 @@ public:
     ANativeWindowBuffer *other;
     struct wl_callback *creation_callback;
 
+    /* wl_shm mirror: for compositors that only composite wl_shm (e.g. KWin's
+     * software/QPainter backend, which doesn't take android_wlegl or dmabuf).
+     * Enabled per-client by env HYBRIS_WL_SHM. */
+    void *shm_data;
+    unsigned long shm_size;
+
     void wlbuffer_from_native_handle(struct android_wlegl *android_wlegl,
                                      struct wl_display *display,
                                      struct wl_event_queue *queue);
+
+    /* Create wnb->wlbuffer as a wl_shm buffer (ARGB8888) + keep a CPU mapping
+     * in shm_data; returns 0 on success. Then update_shm() copies this frame's
+     * gralloc contents into it (format-aware) before each attach. */
+    int  wlbuffer_from_shm(struct wl_shm *shm, struct wl_event_queue *queue);
+    void update_shm(void);
 
     virtual void init(struct android_wlegl *android_wlegl,
                       struct wl_display *display,

@@ -149,6 +149,14 @@ void WaylandNativeWindow::prepareSwap(EGLint *damage_rects, EGLint damage_n_rect
     unlock();
 }
 
+void WaylandNativeWindow::enableShm(struct wl_shm *shm)
+{
+    m_shm = shm;
+    m_use_shm = (shm != NULL) && (getenv("HYBRIS_WL_SHM") != NULL);
+    if (m_use_shm && getenv("HYBRIS_WL_SHM_DEBUG"))
+        fprintf(stderr, "hybris_wl_shm: window %p enabled shm %dx%d\n", (void*)this, m_width, m_height);
+}
+
 void WaylandNativeWindow::finishSwap()
 {
     int ret = 0;
@@ -184,13 +192,23 @@ void WaylandNativeWindow::finishSwap()
     if (wnb) {
         assert(wnb->busy == 1);
 
-        if (!wnb->wlbuffer) {
+        if (m_use_shm && m_shm) {
+            /* wl_shm path: create the shm mirror once, then refresh it from the
+             * just-rendered gralloc buffer every frame (software compositors). */
+            if (!wnb->wlbuffer) {
+                if (wnb->wlbuffer_from_shm(m_shm, wl_queue) == 0)
+                    wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
+            }
+            if (wnb->wlbuffer)
+                wnb->update_shm();
+        } else if (!wnb->wlbuffer) {
             wnb->init(m_android_wlegl, m_display, wl_queue);
             TRACE("%p add listener with %p inside", wnb, wnb->wlbuffer);
             wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
         }
 
-        wl_surface_attach(wl_surface_wrapper, wnb->wlbuffer, 0, 0);
+        if (wnb->wlbuffer)
+            wl_surface_attach(wl_surface_wrapper, wnb->wlbuffer, 0, 0);
 
         m_window->attached_width = wnb->width;
         m_window->attached_height = wnb->height;

@@ -34,8 +34,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <hybris/gralloc/gralloc.h>
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "logging.h"
+
+/* gralloc HAL pixel formats (may already be defined via hardware/gralloc.h) */
+#ifndef HAL_PIXEL_FORMAT_RGBA_8888
+#define HAL_PIXEL_FORMAT_RGBA_8888 1
+#endif
+#ifndef HAL_PIXEL_FORMAT_RGBX_8888
+#define HAL_PIXEL_FORMAT_RGBX_8888 2
+#endif
+#ifndef GRALLOC_USAGE_SW_READ_OFTEN
+#define GRALLOC_USAGE_SW_READ_OFTEN 0x00000003
+#endif
 
 #if ANDROID_VERSION_MAJOR>=4 && ANDROID_VERSION_MINOR>=2 || ANDROID_VERSION_MAJOR>=5
 extern "C" {
@@ -55,6 +75,129 @@ buffer_create_sync_callback(void *data, struct wl_callback *callback, uint32_t s
 static const struct wl_callback_listener buffer_create_sync_listener = {
    buffer_create_sync_callback
 };
+
+/* Create wnb->wlbuffer as an ARGB8888 wl_shm buffer + keep a CPU mapping in
+ * shm_data. For compositors whose only CPU buffer path is wl_shm (KWin's
+ * software/QPainter backend). Enabled per-client via env HYBRIS_WL_SHM. */
+int WaylandNativeWindowBuffer::wlbuffer_from_shm(struct wl_shm *shm,
+                                                 struct wl_event_queue *queue)
+{
+    int w = this->width, h = this->height;
+    if (w <= 0 || h <= 0)
+        return -1;
+    unsigned long dst_stride = (unsigned long)w * 4;
+    unsigned long size = dst_stride * (unsigned long)h;
+
+    int fd = (int)syscall(SYS_memfd_create, "hybris-wl-shm", 0);
+    if (fd < 0)
+        return -1;
+    if (ftruncate(fd, (off_t)size) < 0) { close(fd); return -1; }
+    void *data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return -1; }
+
+    struct wl_shm *shm_wrapper = (struct wl_shm *) wl_proxy_create_wrapper(shm);
+    wl_proxy_set_queue((struct wl_proxy *) shm_wrapper, queue);
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm_wrapper, fd, (int32_t)size);
+    /* HYBRIS_WL_SHM_XRGB: mark shm buffers opaque (XRGB) so software
+     * compositors take the fast copy path instead of per-pixel blending.
+     * "1" applies to every buffer; a larger value is an area threshold in
+     * pixels -- only buffers at least that big (fullscreen views, whose
+     * content is opaque anyway) go opaque, keeping small translucent
+     * surfaces (panels, OSDs) blended. */
+    uint32_t shmfmt = WL_SHM_FORMAT_ARGB8888;
+    {
+        const char *x = getenv("HYBRIS_WL_SHM_XRGB");
+        if (x) {
+            long thr = atol(x);
+            if (thr <= 1 || (long)w * (long)h >= thr)
+                shmfmt = WL_SHM_FORMAT_XRGB8888;
+        }
+    }
+    this->wlbuffer = wl_shm_pool_create_buffer(pool, 0, w, h,
+                                               (int32_t)dst_stride, shmfmt);
+    wl_shm_pool_destroy(pool);
+    wl_proxy_wrapper_destroy(shm_wrapper);
+    close(fd);   /* server keeps its own mapping of the pool; we keep 'data' */
+
+    this->shm_data = data;
+    this->shm_size = size;
+    if (getenv("HYBRIS_WL_SHM_DEBUG"))
+        fprintf(stderr, "hybris_wl_shm: created shm buffer %dx%d stride=%lu fmt=%d wlbuffer=%p\n",
+                w, h, dst_stride, this->format, (void*)this->wlbuffer);
+    return this->wlbuffer ? 0 : -1;
+}
+
+/* Copy this frame's gralloc contents into the shm mirror, converting the
+ * gralloc pixel layout to ARGB8888 (R/B swizzle for RGBA/RGBX). */
+void WaylandNativeWindowBuffer::update_shm(void)
+{
+    if (!this->shm_data || !this->handle)
+        return;
+    int w = this->width, h = this->height;
+
+    static const bool prof = getenv("HYBRIS_WL_SHM_PROF") != NULL;
+    struct timespec tp0, tp1, tp2;
+    if (prof) clock_gettime(CLOCK_MONOTONIC, &tp0);
+
+    void *src = NULL;
+    if (hybris_gralloc_lock(this->handle, GRALLOC_USAGE_SW_READ_OFTEN, 0, 0, w, h, &src) != 0 || !src)
+        return;
+    if (prof) clock_gettime(CLOCK_MONOTONIC, &tp1);
+    unsigned long src_stride = (unsigned long)this->stride * 4;  /* stride is in pixels */
+    unsigned long dst_stride = (unsigned long)w * 4;
+    unsigned char *s = (unsigned char *)src;
+    unsigned char *d = (unsigned char *)this->shm_data;
+    int swizzle = (this->format == HAL_PIXEL_FORMAT_RGBA_8888 ||
+                   this->format == HAL_PIXEL_FORMAT_RGBX_8888);
+
+    /* Pass 1: stream the gralloc buffer (write-combined GPU memory) into the
+     * cached shm mirror with sequential memcpy. Structured/strided reads (ld4)
+     * stall badly on WC memory, but a linear memcpy runs at full burst speed. */
+    if (src_stride == dst_stride) {
+        memcpy(d, s, dst_stride * (unsigned long)h);        /* contiguous fast path */
+    } else {
+        for (int y = 0; y < h; y++)
+            memcpy(d + (unsigned long)y * dst_stride,
+                   s + (unsigned long)y * src_stride, dst_stride);
+    }
+
+    /* Pass 2: swap R<->B in place on the now-cached mirror (fast). */
+    if (swizzle) {
+        unsigned long npx = (unsigned long)w * (unsigned long)h;
+        unsigned long i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        unsigned char *db = d;
+        for (; i + 16 <= npx; i += 16) {
+            uint8x16x4_t px = vld4q_u8(db + i * 4);
+            uint8x16_t r = px.val[0];
+            px.val[0] = px.val[2];
+            px.val[2] = r;
+            vst4q_u8(db + i * 4, px);
+        }
+#endif
+        uint32_t *dp = (uint32_t *)d;
+        for (; i < npx; i++) {
+            uint32_t p = dp[i];                             /* mem B,G,R,A after memcpy of R,G,B,A */
+            dp[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+        }
+    }
+    if (prof) clock_gettime(CLOCK_MONOTONIC, &tp2);
+    hybris_gralloc_unlock(this->handle);
+
+    if (prof) {
+        static double accL = 0.0, accC = 0.0; static int n = 0;
+        static struct timespec tfirst;
+        if (n == 0) tfirst = tp0;
+        accL += (tp1.tv_sec - tp0.tv_sec) * 1e3 + (tp1.tv_nsec - tp0.tv_nsec) / 1e6;
+        accC += (tp2.tv_sec - tp1.tv_sec) * 1e3 + (tp2.tv_nsec - tp1.tv_nsec) / 1e6;
+        if (++n >= 30) {
+            double wall = (tp2.tv_sec - tfirst.tv_sec) * 1e3 + (tp2.tv_nsec - tfirst.tv_nsec) / 1e6;
+            fprintf(stderr, "hybris_wl_shm: lock avg %.2f ms | copy avg %.2f ms | %.1f fps (%dx%d swizzle=%d)\n",
+                    accL / n, accC / n, n * 1000.0 / wall, w, h, swizzle);
+            accL = 0.0; accC = 0.0; n = 0;
+        }
+    }
+}
 
 void WaylandNativeWindowBuffer::wlbuffer_from_native_handle(struct android_wlegl *android_wlegl,
                                                             struct wl_display *display,
@@ -185,8 +328,19 @@ WaylandNativeWindow::WaylandNativeWindow(struct wl_egl_window *window,
     const_cast<int&>(ANativeWindow::maxSwapInterval) = 1;
     // This is the default as per the EGL documentation
     this->m_swap_interval = 1;
+    {
+        const char *e = getenv("HYBRIS_SWAP_INTERVAL");
+        if (e) {
+            int v = atoi(e);
+            if (v >= 0) this->m_swap_interval = v > 1 ? 1 : v;
+        }
+    }
 
     m_usage = GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+    /* wl_shm mirror path reads every frame back on the CPU; ask gralloc for
+     * CPU-cacheable buffers so that readback isn't a write-combined stall. */
+    if (getenv("HYBRIS_WL_SHM"))
+        m_usage |= GRALLOC_USAGE_SW_READ_OFTEN;
     pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&cond, NULL);
     m_queueReads = 0;
@@ -228,6 +382,22 @@ int WaylandNativeWindow::setSwapInterval(int interval) {
         interval = 0;
     if (interval > 1)
         interval = 1;
+
+    /* HYBRIS_SWAP_INTERVAL overrides the app-requested interval. With 0 the
+     * swap path stops blocking on the compositor's frame callback, so the
+     * client's next frame (render + shm copy) overlaps the compositor's
+     * composite of the previous one instead of serializing behind it;
+     * throttling falls back to buffer availability. */
+    {
+        static int forced = -2;
+        if (forced == -2) {
+            const char *e = getenv("HYBRIS_SWAP_INTERVAL");
+            forced = e ? atoi(e) : -1;
+            if (forced > 1) forced = 1;
+        }
+        if (forced >= 0)
+            interval = forced;
+    }
 
     HYBRIS_TRACE_BEGIN("wayland-platform", "swap_interval", "=%d", interval);
 
@@ -447,6 +617,11 @@ void WaylandNativeWindow::destroyBuffer(WaylandNativeWindowBuffer* wnb)
     if (wnb->wlbuffer)
         wl_buffer_destroy(wnb->wlbuffer);
     wnb->wlbuffer = NULL;
+    if (wnb->shm_data) {
+        munmap(wnb->shm_data, wnb->shm_size);
+        wnb->shm_data = NULL;
+        wnb->shm_size = 0;
+    }
     wnb->common.decRef(&wnb->common);
     m_freeBufs--;
 }
@@ -533,6 +708,8 @@ int WaylandNativeWindow::setBuffersDimensions(int width, int height) {
 
 int WaylandNativeWindow::setUsage(uint64_t usage) {
     usage |= GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+    if (getenv("HYBRIS_WL_SHM"))
+        usage |= GRALLOC_USAGE_SW_READ_OFTEN;
 
     lock();
     if (usage != m_usage)
