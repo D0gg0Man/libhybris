@@ -48,6 +48,9 @@ public:
         , creation_callback(0)
         , shm_data(0)
         , shm_size(0)
+        , shm_fd(-1)
+        , shm_fmt(0)
+        , shm_fmt_want(0)
     {}
     WaylandNativeWindowBuffer(ANativeWindowBuffer *other)
     {
@@ -64,6 +67,9 @@ public:
         this->youngest = 0;
         this->shm_data = NULL;
         this->shm_size = 0;
+        this->shm_fd = -1;
+        this->shm_fmt = 0;
+        this->shm_fmt_want = 0;
     }
 
     struct wl_buffer *wlbuffer;
@@ -77,6 +83,10 @@ public:
      * Enabled per-client by env HYBRIS_WL_SHM. */
     void *shm_data;
     unsigned long shm_size;
+    int shm_fd;                 /* memfd kept open so the wl_buffer can be
+                                   recreated with a different format */
+    uint32_t shm_fmt;           /* current wl_shm format of wlbuffer */
+    uint32_t shm_fmt_want;      /* format update_shm() decided this frame */
 
     void wlbuffer_from_native_handle(struct android_wlegl *android_wlegl,
                                      struct wl_display *display,
@@ -84,9 +94,12 @@ public:
 
     /* Create wnb->wlbuffer as a wl_shm buffer (ARGB8888) + keep a CPU mapping
      * in shm_data; returns 0 on success. Then update_shm() copies this frame's
-     * gralloc contents into it (format-aware) before each attach. */
+     * gralloc contents into it (format-aware) before each attach and sets
+     * shm_fmt_want; shm_apply_format() recreates the wl_buffer (same memfd)
+     * when the wanted format differs from the current one. */
     int  wlbuffer_from_shm(struct wl_shm *shm, struct wl_event_queue *queue);
     void update_shm(void);
+    int  shm_apply_format(struct wl_shm *shm, struct wl_event_queue *queue);
 
     virtual void init(struct android_wlegl *android_wlegl,
                       struct wl_display *display,

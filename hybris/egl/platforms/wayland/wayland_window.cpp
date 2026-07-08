@@ -199,8 +199,13 @@ void WaylandNativeWindow::finishSwap()
                 if (wnb->wlbuffer_from_shm(m_shm, wl_queue) == 0)
                     wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
             }
-            if (wnb->wlbuffer)
+            if (wnb->wlbuffer) {
                 wnb->update_shm();
+                /* auto-opacity flip: recreate the wl_buffer (same pixels) if
+                 * this frame's alpha verdict differs from the buffer format. */
+                if (wnb->shm_apply_format(m_shm, wl_queue))
+                    wl_buffer_add_listener(wnb->wlbuffer, &wl_buffer_listener, this);
+            }
         } else if (!wnb->wlbuffer) {
             wnb->init(m_android_wlegl, m_display, wl_queue);
             TRACE("%p add listener with %p inside", wnb, wnb->wlbuffer);

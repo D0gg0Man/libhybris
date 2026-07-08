@@ -53,6 +53,9 @@
 #ifndef HAL_PIXEL_FORMAT_RGBX_8888
 #define HAL_PIXEL_FORMAT_RGBX_8888 2
 #endif
+#ifndef HAL_PIXEL_FORMAT_RGB_565
+#define HAL_PIXEL_FORMAT_RGB_565 4
+#endif
 #ifndef GRALLOC_USAGE_SW_READ_OFTEN
 #define GRALLOC_USAGE_SW_READ_OFTEN 0x00000003
 #endif
@@ -101,13 +104,14 @@ int WaylandNativeWindowBuffer::wlbuffer_from_shm(struct wl_shm *shm,
     /* HYBRIS_WL_SHM_XRGB: mark shm buffers opaque (XRGB) so software
      * compositors take the fast copy path instead of per-pixel blending.
      * "1" applies to every buffer; a larger value is an area threshold in
-     * pixels -- only buffers at least that big (fullscreen views, whose
-     * content is opaque anyway) go opaque, keeping small translucent
-     * surfaces (panels, OSDs) blended. */
+     * pixels; "auto" decides per FRAME by sampling the rendered alpha
+     * (opaque frames -> XRGB fast path, translucent overlays -> ARGB), with
+     * update_shm() setting shm_fmt_want and shm_apply_format() recreating
+     * the wl_buffer from the same memfd when the state flips. */
     uint32_t shmfmt = WL_SHM_FORMAT_ARGB8888;
     {
         const char *x = getenv("HYBRIS_WL_SHM_XRGB");
-        if (x) {
+        if (x && strcmp(x, "auto") != 0) {
             long thr = atol(x);
             if (thr <= 1 || (long)w * (long)h >= thr)
                 shmfmt = WL_SHM_FORMAT_XRGB8888;
@@ -117,14 +121,43 @@ int WaylandNativeWindowBuffer::wlbuffer_from_shm(struct wl_shm *shm,
                                                (int32_t)dst_stride, shmfmt);
     wl_shm_pool_destroy(pool);
     wl_proxy_wrapper_destroy(shm_wrapper);
-    close(fd);   /* server keeps its own mapping of the pool; we keep 'data' */
 
     this->shm_data = data;
     this->shm_size = size;
+    this->shm_fd = fd;      /* kept open for shm_apply_format() recreation */
+    this->shm_fmt = shmfmt;
+    this->shm_fmt_want = shmfmt;
     if (getenv("HYBRIS_WL_SHM_DEBUG"))
         fprintf(stderr, "hybris_wl_shm: created shm buffer %dx%d stride=%lu fmt=%d wlbuffer=%p\n",
                 w, h, dst_stride, this->format, (void*)this->wlbuffer);
     return this->wlbuffer ? 0 : -1;
+}
+
+/* Recreate the wl_buffer (same memfd/pixels) when update_shm() wants a
+ * different opacity format than the current wl_buffer carries. Called from
+ * finishSwap() BEFORE attach: this buffer is not referenced by any pending
+ * commit, so destroying the old wl_buffer is safe. Returns 1 if recreated. */
+int WaylandNativeWindowBuffer::shm_apply_format(struct wl_shm *shm,
+                                                struct wl_event_queue *queue)
+{
+    if (this->shm_fd < 0 || !this->shm_data || this->shm_fmt_want == this->shm_fmt)
+        return 0;
+    struct wl_shm *shm_wrapper = (struct wl_shm *) wl_proxy_create_wrapper(shm);
+    wl_proxy_set_queue((struct wl_proxy *) shm_wrapper, queue);
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm_wrapper, this->shm_fd,
+                                                  (int32_t)this->shm_size);
+    struct wl_buffer *nb = wl_shm_pool_create_buffer(pool, 0, this->width, this->height,
+                                                     (int32_t)((unsigned long)this->width * 4),
+                                                     this->shm_fmt_want);
+    wl_shm_pool_destroy(pool);
+    wl_proxy_wrapper_destroy(shm_wrapper);
+    if (!nb)
+        return 0;
+    if (this->wlbuffer)
+        wl_buffer_destroy(this->wlbuffer);
+    this->wlbuffer = nb;
+    this->shm_fmt = this->shm_fmt_want;
+    return 1;
 }
 
 /* Copy this frame's gralloc contents into the shm mirror, converting the
@@ -143,13 +176,35 @@ void WaylandNativeWindowBuffer::update_shm(void)
     if (hybris_gralloc_lock(this->handle, GRALLOC_USAGE_SW_READ_OFTEN, 0, 0, w, h, &src) != 0 || !src)
         return;
     if (prof) clock_gettime(CLOCK_MONOTONIC, &tp1);
-    unsigned long src_stride = (unsigned long)this->stride * 4;  /* stride is in pixels */
     unsigned long dst_stride = (unsigned long)w * 4;
     unsigned char *s = (unsigned char *)src;
     unsigned char *d = (unsigned char *)this->shm_data;
     int swizzle = (this->format == HAL_PIXEL_FORMAT_RGBA_8888 ||
                    this->format == HAL_PIXEL_FORMAT_RGBX_8888);
 
+    /* 16-bit configs happen (EGL sorts smaller color buffers first when the
+     * app requests no explicit sizes): expand RGB565 to the ARGB8888 mirror.
+     * Reading such a buffer with the 32-bit path runs 2x past every row --
+     * garbage on screen, then a fault past the buffer end. */
+    if (this->format == HAL_PIXEL_FORMAT_RGB_565) {
+        unsigned long src_stride = (unsigned long)this->stride * 2;
+        for (int y = 0; y < h; y++) {
+            const uint16_t *sp = (const uint16_t *)(s + (unsigned long)y * src_stride);
+            uint32_t *dp = (uint32_t *)(d + (unsigned long)y * dst_stride);
+            for (int x = 0; x < w; x++) {
+                uint16_t p = sp[x];
+                uint32_t r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
+                dp[x] = 0xFF000000u |
+                        (((r << 3) | (r >> 2)) << 16) |
+                        (((g << 2) | (g >> 4)) << 8) |
+                        ((b << 3) | (b >> 2));
+            }
+        }
+        goto copied;
+    }
+
+    {
+    unsigned long src_stride = (unsigned long)this->stride * 4;  /* stride is in pixels */
     /* Pass 1: stream the gralloc buffer (write-combined GPU memory) into the
      * cached shm mirror with sequential memcpy. Structured/strided reads (ld4)
      * stall badly on WC memory, but a linear memcpy runs at full burst speed. */
@@ -159,6 +214,7 @@ void WaylandNativeWindowBuffer::update_shm(void)
         for (int y = 0; y < h; y++)
             memcpy(d + (unsigned long)y * dst_stride,
                    s + (unsigned long)y * src_stride, dst_stride);
+    }
     }
 
     /* Pass 2: swap R<->B in place on the now-cached mirror (fast). */
@@ -179,6 +235,35 @@ void WaylandNativeWindowBuffer::update_shm(void)
         for (; i < npx; i++) {
             uint32_t p = dp[i];                             /* mem B,G,R,A after memcpy of R,G,B,A */
             dp[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+        }
+    }
+copied:
+    /* "auto" opacity: sample the mirror's alpha on a sparse grid; a frame
+     * with every sampled alpha == 255 is submitted as XRGB (compositor fast
+     * copy path), anything translucent as ARGB (correct blending). Formats
+     * without alpha (RGBX/RGB565) are opaque by definition. */
+    {
+        static int aut = -1;
+        if (aut < 0) {
+            const char *x = getenv("HYBRIS_WL_SHM_XRGB");
+            aut = (x && strcmp(x, "auto") == 0) ? 1 : 0;
+        }
+        if (aut) {
+            int opaque = 1;
+            if (this->format == HAL_PIXEL_FORMAT_RGBA_8888) {
+                const uint32_t *px = (const uint32_t *)d;
+                for (int gy = 0; gy < 16 && opaque; gy++) {
+                    unsigned long row = ((unsigned long)gy * (h - 1) / 15) * (unsigned long)w;
+                    for (int gx = 0; gx < 16; gx++) {
+                        /* mirror holds ARGB words: alpha = top byte */
+                        if ((px[row + (unsigned long)gx * (w - 1) / 15] >> 24) != 0xFF) {
+                            opaque = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            this->shm_fmt_want = opaque ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888;
         }
     }
     if (prof) clock_gettime(CLOCK_MONOTONIC, &tp2);
@@ -621,6 +706,10 @@ void WaylandNativeWindow::destroyBuffer(WaylandNativeWindowBuffer* wnb)
         munmap(wnb->shm_data, wnb->shm_size);
         wnb->shm_data = NULL;
         wnb->shm_size = 0;
+    }
+    if (wnb->shm_fd >= 0) {
+        close(wnb->shm_fd);
+        wnb->shm_fd = -1;
     }
     wnb->common.decRef(&wnb->common);
     m_freeBufs--;
